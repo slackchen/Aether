@@ -1,0 +1,28 @@
+# Build outputs
+build/
+build-win/
+build-backup-*/
+web/
+
+# Emscripten SDK (third-party toolchain)
+emsdk/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# IDE
+.vs/
+*.user
+*.suo
+
+# Windows
+*.exe
+*.dll
+*.obj
+*.lib
+
+# Temp / scratch
+*.raw
+*.wav
