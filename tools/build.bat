@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0.."
 echo Aether 3D Engine - Build Script (Windows)
 echo ==========================================
 echo.

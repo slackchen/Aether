@@ -192,9 +192,7 @@ void SpriteBatch::render(rhi::RHICommandEncoder* encoder, const Mat4& vp) {
 
     std::vector<Sprite> sorted = sprites_;
     std::stable_sort(sorted.begin(), sorted.end(), [](const Sprite& a, const Sprite& b) {
-        if (a.layer != b.layer) return a.layer < b.layer;
-        if (a.blend != b.blend) return a.blend == rhi::BlendMode::Alpha;
-        return a.texture.get() < b.texture.get();
+        return a.layer < b.layer;
     });
 
     const u32 total = static_cast<u32>(sorted.size());

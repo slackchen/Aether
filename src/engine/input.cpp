@@ -6,6 +6,7 @@
 #else
 #include <windows.h>
 #include <xinput.h>
+#include "platform/platform.h"
 #endif
 
 namespace aether::engine {
@@ -147,7 +148,16 @@ bool vk_down(int vk) {
     return (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
 
+bool window_focused() {
+    HWND foreground = GetForegroundWindow();
+    HWND ours = (HWND)aether::platform::native_window_handle();
+    if (!ours) return false;
+    HWND active = GetActiveWindow();
+    return foreground == ours || active == ours || GetFocus() != nullptr && GetAncestor(GetFocus(), GA_ROOT) == ours;
+}
+
 void poll_keyboard(bool keys[kKeyCount]) {
+    if (!window_focused()) return;
     for (u32 k = 0; k < kKeyCount; k++) {
         for (int i = 0; i < 2; i++) {
             if (vk_down(kVkList[k][i])) {

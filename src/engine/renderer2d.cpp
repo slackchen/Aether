@@ -110,11 +110,12 @@ void Renderer2D::shutdown() {
 
 bool Renderer2D::begin_frame() {
     if (!ready_ || frame_started_) return false;
-    encoder_ = device_->create_command_encoder();
-    if (!encoder_) return false;
 
     auto* color_view = swapchain_->get_current_view();
     if (!color_view) return false;
+
+    encoder_ = device_->create_command_encoder();
+    if (!encoder_) return false;
 
     rhi::RenderPassColorAttachment color_attach;
     color_attach.view = color_view;

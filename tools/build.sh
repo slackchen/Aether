@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.."
 echo "Aether 3D Engine - Build Script (Linux/macOS)"
 echo "============================================="
 echo

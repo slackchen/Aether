@@ -100,6 +100,9 @@ struct D3D11Swapchain : public rhi::RHISwapchain {
     u32 rtv_h = 0;
     rhi::Format color_fmt = rhi::Format::BGRA8Unorm;
     bool configured = false;
+    LONG_PTR saved_style_ = 0;
+    RECT saved_rect_ = {};
+    bool borderless_ = false;
 
     D3D11Swapchain(ComPtr<ID3D11Device> dev, ComPtr<IDXGISwapChain1> sc, HWND hwnd, u32 width, u32 height);
     ~D3D11Swapchain() override = default;

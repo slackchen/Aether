@@ -105,12 +105,13 @@ DomBackend s_dom_backend;
 
 #else
 
-constexpr u32 kAtlasCell = 48;
+constexpr u32 kAtlasCell = 56;
 constexpr u32 kAtlasCols = 16;
 constexpr u32 kAtlasRows = 6;
 constexpr u32 kAtlasWidth = kAtlasCols * kAtlasCell;
 constexpr u32 kAtlasHeight = kAtlasRows * kAtlasCell;
 constexpr u32 kAtlasFontPx = 36;
+constexpr u32 kAtlasPad = (kAtlasCell - kAtlasFontPx) / 2;
 
 constexpr i32 kLayerHud = 20;
 constexpr i32 kLayerBoss = 21;
@@ -120,6 +121,10 @@ constexpr i32 kLayerFlash = 35;
 struct GlyphInfo {
     u32 uv_x = 0;
     u32 uv_y = 0;
+    u32 bb_x = 0;
+    u32 bb_y = 0;
+    u32 bb_w = 0;
+    u32 bb_h = 0;
     u32 advance = 0;
 };
 
@@ -334,7 +339,7 @@ private:
 
         SetBkMode(mem, TRANSPARENT);
         SetTextAlign(mem, TA_TOP | TA_LEFT);
-        LONG cell_pad = (LONG)(kAtlasCell - kAtlasFontPx) / 2;
+        LONG cell_pad = (LONG)kAtlasPad;
 
         for (u32 i = 0; i < 95; i++) {
             u32 c = i + 32;
@@ -360,6 +365,34 @@ private:
                 rgba_[idx + 1] = 255;
                 rgba_[idx + 2] = 255;
                 rgba_[idx + 3] = lum;
+            }
+        }
+
+        for (u32 i = 0; i < 95; i++) {
+            u32 col = i % kAtlasCols;
+            u32 row = i / kAtlasCols;
+            u32 x0 = col * kAtlasCell;
+            u32 y0 = row * kAtlasCell;
+            u32 min_x = kAtlasCell, max_x = 0, min_y = kAtlasCell, max_y = 0;
+            for (u32 yy = 0; yy < kAtlasCell; yy++) {
+                for (u32 xx = 0; xx < kAtlasCell; xx++) {
+                    u32 idx = ((y0 + yy) * kAtlasWidth + (x0 + xx)) * 4;
+                    if (rgba_[idx + 3] > 0) {
+                        if (xx < min_x) min_x = xx;
+                        if (xx > max_x) max_x = xx;
+                        if (yy < min_y) min_y = yy;
+                        if (yy > max_y) max_y = yy;
+                    }
+                }
+            }
+            if (max_x >= min_x && max_y >= min_y) {
+                glyphs_[i].bb_x = min_x;
+                glyphs_[i].bb_y = min_y;
+                glyphs_[i].bb_w = max_x - min_x + 1;
+                glyphs_[i].bb_h = max_y - min_y + 1;
+            } else {
+                glyphs_[i].bb_w = 0;
+                glyphs_[i].bb_h = 0;
             }
         }
 
@@ -400,18 +433,35 @@ private:
         f32 total = measure(text, px, spacing);
         f32 x = centered ? world_x - total * 0.5f : world_x;
         f32 y = world_y;
-        f32 pad = (f32)(kAtlasCell - kAtlasFontPx) / 2.0f;
+
+        f32 ink_top = 1e30f, ink_bottom = -1e30f;
+        for (const char* p = text; *p; p++) {
+            u32 c = (u8)*p;
+            if (c < 32 || c > 126) c = '?';
+            const GlyphInfo& g = glyphs_[c - 32];
+            if (g.bb_w == 0 || g.bb_h == 0) continue;
+            if ((f32)g.bb_y < ink_top) ink_top = (f32)g.bb_y;
+            if ((f32)(g.bb_y + g.bb_h) > ink_bottom) ink_bottom = (f32)(g.bb_y + g.bb_h);
+        }
+        f32 ink_center = (ink_top + ink_bottom) * 0.5f;
 
         for (const char* p = text; *p; p++) {
             u32 c = (u8)*p;
             if (c < 32 || c > 126) c = '?';
             const GlyphInfo& g = glyphs_[c - 32];
-            Vec2 uv0{(f32)g.uv_x / (f32)kAtlasWidth,
-                     ((f32)g.uv_y + pad) / (f32)kAtlasHeight};
-            Vec2 uv1{uv0.x + (f32)g.advance / (f32)kAtlasWidth,
-                     uv0.y + (f32)kAtlasFontPx / (f32)kAtlasHeight};
-            Vec2 center{x + (f32)g.advance * scale * 0.5f, y + (f32)kAtlasFontPx * scale * 0.5f};
-            Vec2 size{(f32)g.advance * scale, (f32)kAtlasFontPx * scale};
+            if (g.bb_w == 0 || g.bb_h == 0) {
+                x += ((f32)g.advance + spacing) * scale;
+                continue;
+            }
+            f32 gw = (f32)g.bb_w * scale;
+            f32 gh = (f32)g.bb_h * scale;
+            Vec2 uv0{(f32)(g.uv_x + g.bb_x) / (f32)kAtlasWidth,
+                     (f32)(g.uv_y + g.bb_y) / (f32)kAtlasHeight};
+            Vec2 uv1{(f32)(g.uv_x + g.bb_x + g.bb_w) / (f32)kAtlasWidth,
+                     (f32)(g.uv_y + g.bb_y + g.bb_h) / (f32)kAtlasHeight};
+            f32 glyph_y = y + ((f32)g.bb_y - ink_center) * scale;
+            Vec2 center{x + gw * 0.5f, glyph_y + gh * 0.5f};
+            Vec2 size{gw, gh};
             if (glow > 0.0f) {
                 batch.add_uv(atlas_, uv0, uv1, center, size, color(col.r, col.g, col.b, col.a * glow),
                              0.0f, layer, rhi::BlendMode::Additive);

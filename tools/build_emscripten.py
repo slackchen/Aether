@@ -2,7 +2,7 @@ import os
 import sys
 import subprocess
 
-base = os.path.dirname(os.path.abspath(__file__))
+base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 upstream = os.path.join(base, 'emsdk', 'upstream', 'install')
 emscripten_root = os.path.join(upstream, 'emscripten')
 emcc_py = os.path.join(emscripten_root, 'emcc.py')
