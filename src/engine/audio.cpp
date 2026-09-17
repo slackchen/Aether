@@ -184,9 +184,47 @@ void synth_sfx(Sfx sfx, std::vector<float>& out) {
             synth_tone(out, 420.0f, 0.8f, 2, 0.28f, 50.0f, 0.0f);
             synth_noise(out, 0.9f, 0.5f, 500.0f, 0, 0.0f);
             break;
+        case Sfx::Click:
+            synth_tone(out, 1400.0f, 0.03f, 0, 0.15f, 1800.0f, 0.0f);
+            break;
+        case Sfx::Build:
+            synth_tone(out, 440.0f, 0.08f, 1, 0.18f, 880.0f, 0.0f);
+            synth_tone(out, 660.0f, 0.12f, 0, 0.15f, 1320.0f, 0.03f);
+            break;
+        case Sfx::Dismantle:
+            synth_tone(out, 680.0f, 0.09f, 2, 0.15f, 240.0f, 0.0f);
+            synth_noise(out, 0.12f, 0.12f, 800.0f, 0, 0.0f);
+            break;
+        case Sfx::PowerConnect:
+            synth_tone(out, 330.0f, 0.22f, 1, 0.18f, 660.0f, 0.0f);
+            synth_tone(out, 660.0f, 0.18f, 2, 0.12f, 1320.0f, 0.04f);
+            break;
+        case Sfx::DroneLaunch:
+            synth_tone(out, 550.0f, 0.30f, 0, 0.20f, 1650.0f, 0.0f);
+            synth_noise(out, 0.25f, 0.10f, 3200.0f, 1, 0.05f);
+            break;
+        case Sfx::Warp:
+            synth_tone(out, 120.0f, 0.70f, 3, 0.35f, 750.0f, 0.0f);
+            synth_tone(out, 750.0f, 0.50f, 1, 0.25f, 2200.0f, 0.15f);
+            synth_noise(out, 0.60f, 0.20f, 1100.0f, 0, 0.10f);
+            break;
+        case Sfx::TechUnlock:
+            synth_tone(out, 523.25f, 0.16f, 1, 0.18f, 523.25f, 0.0f);
+            synth_tone(out, 659.25f, 0.16f, 1, 0.18f, 659.25f, 0.08f);
+            synth_tone(out, 783.99f, 0.20f, 1, 0.20f, 783.99f, 0.16f);
+            synth_tone(out, 1046.50f, 0.30f, 0, 0.25f, 1046.50f, 0.24f);
+            break;
+        case Sfx::RocketLaunch:
+            synth_noise(out, 1.10f, 0.55f, 380.0f, 0, 0.0f);
+            synth_tone(out, 95.0f, 0.90f, 3, 0.38f, 280.0f, 0.0f);
+            break;
     }
 }
 
+static std::atomic<int> g_music_mode{0};
+static std::atomic<float> g_vacuum_filter{0.0f};
+
+// Mode 0 (Flight Shmup Arcade Music)
 constexpr float kBassRoots[4] = {110.0f, 87.31f, 130.81f, 98.0f};
 constexpr int kBassPat[16] = {1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1};
 constexpr float kLead[64] = {
@@ -196,29 +234,86 @@ constexpr float kLead[64] = {
     523.25f, 0, 0, 0, 659.25f, 0, 0, 0, 783.99f, 0, 659.25f, 0, 587.33f, 0, 523.25f, 0,
 };
 
+// Mode 1: Deep Ethereal Space Ambient (Dyson Sphere Program)
+constexpr float kSpacePadRoots[4] = {174.61f, 196.00f, 220.00f, 164.81f}; // F3, G3, A3, E3
+constexpr float kSpacePadThirds[4] = {220.00f, 246.94f, 261.63f, 196.00f}; // A3, B3, C4, G3
+constexpr float kSpacePadFifths[4] = {261.63f, 293.66f, 329.63f, 246.94f}; // C4, D4, E4, B3
+constexpr float kSpacePadNinths[4] = {392.00f, 440.00f, 493.88f, 369.99f}; // G4, A4, B4, F#4
+
+constexpr float kSpaceTwinkle[64] = {
+    523.25f, 0, 659.25f, 0, 783.99f, 0, 1046.50f, 0, 880.00f, 0, 659.25f, 0, 523.25f, 0, 0, 0,
+    587.33f, 0, 783.99f, 0, 880.00f, 0, 1174.66f, 0, 987.77f, 0, 783.99f, 0, 587.33f, 0, 0, 0,
+    659.25f, 0, 880.00f, 0, 1046.50f, 0, 1318.51f, 0, 1046.50f, 0, 880.00f, 0, 659.25f, 0, 0, 0,
+    493.88f, 0, 659.25f, 0, 783.99f, 0, 987.77f, 0, 880.00f, 0, 659.25f, 0, 493.88f, 0, 0, 0
+};
+
+// Mode 2: Planetary Industrial Pulse (DSP Ground Factor)
+constexpr float kFactoryBass[4] = {55.0f, 65.41f, 73.42f, 48.99f}; // A1, C2, D2, G1
+
 void synth_music_step(int step, int intensity, std::vector<float>& out) {
+    int mode = g_music_mode.load();
     int bar = (step / 16) % 4;
     int bs = step % 16;
     float gm = intensity >= 1 ? 1.15f : 1.0f;
 
-    if (kBassPat[bs] == 1) {
-        synth_tone(out, kBassRoots[bar], 0.16f, 3, 0.28f * gm, kBassRoots[bar], 0.0f);
-        synth_tone(out, kBassRoots[bar] * 2.0f, 0.1f, 1, 0.05f * gm, kBassRoots[bar] * 2.0f, 0.0f);
-    }
-    float lf = kLead[step];
-    if (lf > 0) {
-        synth_tone(out, lf, 0.14f, 1, 0.1f * gm, lf, 0.0f);
-    }
-    if (intensity >= 1 && step % 2 == 0) {
-        synth_tone(out, lf > 0 ? lf * 2.0f : 880.0f, 0.05f, 2, 0.04f * gm, lf > 0 ? lf * 2.0f : 880.0f, 0.0f);
-    }
-    if (bs == 0 || bs == 8) {
-        synth_tone(out, 150.0f, 0.1f, 0, 0.6f * gm, 45.0f, 0.0f);
-    } else if (bs == 4 || bs == 12) {
-        synth_noise(out, 0.12f, 0.22f * gm, 1800.0f, 1, 0.0f);
-    }
-    if (bs % 2 == 0) {
-        synth_noise(out, 0.04f, 0.08f * gm, 7000.0f, 2, 0.0f);
+    if (mode == 0) {
+        // Mode 0: Flight Shmup Arcade Music
+        if (kBassPat[bs] == 1) {
+            synth_tone(out, kBassRoots[bar], 0.16f, 3, 0.28f * gm, kBassRoots[bar], 0.0f);
+            synth_tone(out, kBassRoots[bar] * 2.0f, 0.1f, 1, 0.05f * gm, kBassRoots[bar] * 2.0f, 0.0f);
+        }
+        float lf = kLead[step];
+        if (lf > 0) {
+            synth_tone(out, lf, 0.14f, 1, 0.1f * gm, lf, 0.0f);
+        }
+        if (intensity >= 1 && step % 2 == 0) {
+            synth_tone(out, lf > 0 ? lf * 2.0f : 880.0f, 0.05f, 2, 0.04f * gm, lf > 0 ? lf * 2.0f : 880.0f, 0.0f);
+        }
+        if (bs == 0 || bs == 8) {
+            synth_tone(out, 150.0f, 0.1f, 0, 0.6f * gm, 45.0f, 0.0f);
+        } else if (bs == 4 || bs == 12) {
+            synth_noise(out, 0.12f, 0.22f * gm, 1800.0f, 1, 0.0f);
+        }
+        if (bs % 2 == 0) {
+            synth_noise(out, 0.04f, 0.08f * gm, 7000.0f, 2, 0.0f);
+        }
+    } else if (mode == 1) {
+        // Mode 1: Deep Cosmic Space Ambient (Dyson Sphere Program)
+        if (bs == 0) {
+            // Sustained Ambient Chord Pads
+            synth_tone(out, kSpacePadRoots[bar] * 0.5f, 1.8f, 0, 0.18f * gm, kSpacePadRoots[bar] * 0.5f, 0.0f);
+            synth_tone(out, kSpacePadRoots[bar], 1.6f, 1, 0.12f * gm, kSpacePadRoots[bar], 0.0f);
+            synth_tone(out, kSpacePadThirds[bar], 1.6f, 0, 0.10f * gm, kSpacePadThirds[bar], 0.0f);
+            synth_tone(out, kSpacePadFifths[bar], 1.5f, 1, 0.08f * gm, kSpacePadFifths[bar], 0.0f);
+            synth_tone(out, kSpacePadNinths[bar], 1.4f, 0, 0.06f * gm, kSpacePadNinths[bar], 0.0f);
+        }
+        // Gentle Starry Twinkle
+        float tw = kSpaceTwinkle[step];
+        if (tw > 0.0f && bs % 2 == 0) {
+            synth_tone(out, tw, 0.45f, 0, 0.045f * gm, tw, 0.0f);
+            synth_tone(out, tw * 1.5f, 0.35f, 1, 0.020f * gm, tw * 1.5f, 0.05f);
+        }
+        // Deep sub-drone
+        if (bs == 0 || bs == 8) {
+            synth_tone(out, 43.65f, 0.8f, 0, 0.15f, 43.65f, 0.0f);
+        }
+    } else if (mode == 2) {
+        // Mode 2: Planetary Industrial Groove
+        if (bs % 4 == 0) {
+            synth_tone(out, kFactoryBass[bar], 0.22f, 3, 0.22f * gm, kFactoryBass[bar], 0.0f);
+            synth_tone(out, kFactoryBass[bar] * 2.0f, 0.15f, 1, 0.10f * gm, kFactoryBass[bar] * 2.0f, 0.0f);
+        }
+        // Industrial Clock & Hi-tech pulses
+        if (bs % 2 == 0) {
+            synth_noise(out, 0.03f, 0.04f * gm, 4800.0f, 2, 0.0f);
+        }
+        if (bs == 4 || bs == 12) {
+            synth_noise(out, 0.06f, 0.08f * gm, 1600.0f, 1, 0.0f);
+        }
+        float tw = kSpaceTwinkle[step];
+        if (tw > 0.0f) {
+            synth_tone(out, tw * 0.5f, 0.12f, 2, 0.06f * gm, tw * 0.5f, 0.0f);
+        }
     }
 }
 
@@ -272,12 +367,15 @@ void fill_audio(float* dst, u32 frames) {
         }
     }
 
-    float peak = 0.0f;
-    for (u32 i = 0; i < frames; i++) {
-        float a = dst[i] < 0.0f ? -dst[i] : dst[i];
-        if (a > peak) peak = a;
+    float vac = g_vacuum_filter.load();
+    if (vac > 0.01f) {
+        static float s_lpf_state = 0.0f;
+        float alpha = 1.0f - vac * 0.88f;
+        for (u32 i = 0; i < frames; i++) {
+            s_lpf_state += alpha * (dst[i] - s_lpf_state);
+            dst[i] = s_lpf_state;
+        }
     }
-    (void)peak;
 }
 
 void sfx_queue(Sfx sfx) {
@@ -576,6 +674,23 @@ void Audio::set_music_intensity(i32 intensity) {
     g_music_intensity.store((int)intensity);
 }
 
+void Audio::set_music_track(MusicTrack track) {
+    set_music_mode((i32)track);
+}
+
+void Audio::set_music_mode(i32 mode) {
+    if (g_music_mode.load() != (int)mode) {
+        g_music_mode.store((int)mode);
+        std::lock_guard<std::mutex> lk(g_music_mutex);
+        g_music_queue.clear();
+        g_music_step = 0;
+    }
+}
+
+void Audio::set_vacuum_filter(f32 factor) {
+    g_vacuum_filter.store(std::clamp(factor, 0.0f, 1.0f));
+}
+
 void Audio::stop_music() {
     std::lock_guard<std::mutex> lk(g_music_mutex);
     g_music_on = false;
@@ -583,3 +698,4 @@ void Audio::stop_music() {
 }
 
 }
+

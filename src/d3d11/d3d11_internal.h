@@ -46,6 +46,7 @@ struct D3D11Shader : public rhi::RHIShader {
 struct D3D11TextureView : public rhi::RHITextureView {
     ComPtr<ID3D11ShaderResourceView> srv;
     ComPtr<ID3D11RenderTargetView> rtv;
+    ComPtr<ID3D11DepthStencilView> dsv;
 
     ~D3D11TextureView() override = default;
 };
@@ -82,6 +83,7 @@ struct D3D11RenderPipeline : public rhi::RHIRenderPipeline {
     ComPtr<ID3D11InputLayout> input_layout;
     ComPtr<ID3D11RasterizerState> rasterizer;
     ComPtr<ID3D11BlendState> blend;
+    ComPtr<ID3D11DepthStencilState> depth_stencil;
     u32 vertex_stride = 0;
     D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 
@@ -93,6 +95,8 @@ struct D3D11Swapchain : public rhi::RHISwapchain {
     ComPtr<IDXGISwapChain1> swapchain;
     ComPtr<ID3D11RenderTargetView> rtv;
     ComPtr<ID3D11Texture2D> backbuffer;
+    ComPtr<ID3D11Texture2D> depth_buffer;
+    ComPtr<ID3D11DepthStencilView> dsv;
     HWND hwnd = nullptr;
     u32 w = 0;
     u32 h = 0;
@@ -109,10 +113,12 @@ struct D3D11Swapchain : public rhi::RHISwapchain {
     u32 width() const override { return w; }
     u32 height() const override { return h; }
     rhi::RHITextureView* get_current_view() override;
+    rhi::RHITextureView* get_depth_view() override;
     rhi::Format color_format() const override { return color_fmt; }
-    rhi::Format depth_format() const override { return rhi::Format::Undefined; }
+    rhi::Format depth_format() const override { return rhi::Format::Depth32Float; }
     bool present() override;
     void toggle_fullscreen();
+    void ensure_depth_buffer();
 };
 
 struct D3D11CommandEncoder : public rhi::RHICommandEncoder {
@@ -143,6 +149,10 @@ struct D3D11Device : public rhi::RHIDevice {
     HWND hwnd = nullptr;
     bool init_ok = false;
     std::shared_ptr<D3D11Swapchain> current_swapchain;
+
+    // 局部上传用的 grow-only staging 缓冲 (避免 UpdateSubresource 整块重传)
+    ComPtr<ID3D11Buffer> upload_staging;
+    u64 upload_staging_size = 0;
 
     ~D3D11Device() override = default;
     rhi::BackendType backend_type() const override { return rhi::BackendType::D3D11; }

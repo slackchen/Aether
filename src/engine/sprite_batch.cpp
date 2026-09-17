@@ -14,7 +14,8 @@ bool SpriteBatch::init(rhi::RHIDevice* device, rhi::Format color_format) {
     rhi::BufferDesc vb_desc;
     vb_desc.size = kMaxSprites * kVerticesPerSprite * kFloatsPerVertex * sizeof(f32);
     vb_desc.usage = (u32)rhi::BufferUsage::Vertex | (u32)rhi::BufferUsage::CopyDst;
-    vb_desc.memory_type = rhi::BufferMemoryType::DeviceLocal;
+    // 每帧更新的顶点缓冲用 HostVisible, 走 Map DISCARD (驱动重命名, 无同步停顿)
+    vb_desc.memory_type = rhi::BufferMemoryType::HostVisible;
     vertex_buffer_ = device_->create_buffer(vb_desc, nullptr);
     if (!vertex_buffer_) {
         printf("SpriteBatch: failed to create vertex buffer\n");
@@ -44,7 +45,7 @@ bool SpriteBatch::init(rhi::RHIDevice* device, rhi::Format color_format) {
     rhi::BufferDesc ub_desc;
     ub_desc.size = sizeof(f32) * 16;
     ub_desc.usage = (u32)rhi::BufferUsage::Uniform | (u32)rhi::BufferUsage::CopyDst;
-    ub_desc.memory_type = rhi::BufferMemoryType::DeviceLocal;
+    ub_desc.memory_type = rhi::BufferMemoryType::HostVisible;
     uniform_buffer_ = device_->create_buffer(ub_desc, nullptr);
     if (!uniform_buffer_) {
         printf("SpriteBatch: failed to create uniform buffer\n");
@@ -129,7 +130,7 @@ void SpriteBatch::clear() {
 }
 
 void SpriteBatch::add(std::shared_ptr<rhi::RHITexture> texture, const Vec2& position, const Vec2& size,
-                      const Color& color, f32 rotation, i32 layer, rhi::BlendMode blend) {
+                      const Color& color, f32 rotation, f32 layer, rhi::BlendMode blend) {
     if (!texture) return;
     Sprite sprite;
     sprite.texture = std::move(texture);
@@ -139,37 +140,77 @@ void SpriteBatch::add(std::shared_ptr<rhi::RHITexture> texture, const Vec2& posi
     sprite.rotation = rotation;
     sprite.layer = layer;
     sprite.blend = blend;
-    sprites_.push_back(sprite);
+    if (sprites_.size() < kMaxSprites) {
+        sprites_.push_back(sprite);
+    }
 }
 
 void SpriteBatch::add_uv(std::shared_ptr<rhi::RHITexture> texture, const Vec2& uv0, const Vec2& uv1,
                          const Vec2& position, const Vec2& size, const Color& color, f32 rotation,
-                         i32 layer, rhi::BlendMode blend) {
+                         f32 layer, rhi::BlendMode blend) {
     if (!texture) return;
     Sprite sprite;
     sprite.texture = std::move(texture);
+    sprite.uv0 = uv0;
+    sprite.uv1 = uv1;
     sprite.position = position;
     sprite.size = size;
     sprite.color = color;
     sprite.rotation = rotation;
     sprite.layer = layer;
     sprite.blend = blend;
+    if (sprites_.size() < kMaxSprites) {
+        sprites_.push_back(sprite);
+    }
+}
+
+void SpriteBatch::add_quad(std::shared_ptr<rhi::RHITexture> texture,
+                          const Vec2& p0, const Vec2& p1, const Vec2& p2, const Vec2& p3,
+                          const Color& color, f32 layer,
+                          const Vec2& uv0, const Vec2& uv1,
+                          rhi::BlendMode blend) {
+    if (!texture || sprites_.size() >= kMaxSprites) return;
+    Sprite sprite;
+    sprite.texture = std::move(texture);
+    sprite.color = color;
+    sprite.layer = layer;
+    sprite.blend = blend;
     sprite.uv0 = uv0;
     sprite.uv1 = uv1;
+    sprite.is_custom_quad = true;
+    sprite.quad_pts[0] = p0;
+    sprite.quad_pts[1] = p1;
+    sprite.quad_pts[2] = p2;
+    sprite.quad_pts[3] = p3;
     sprites_.push_back(sprite);
 }
 
 void SpriteBatch::build_quad(const Sprite& sprite, f32* verts) {
+    const f32 uvs[4][2] = {{sprite.uv0.x, sprite.uv0.y},
+                           {sprite.uv1.x, sprite.uv0.y},
+                           {sprite.uv0.x, sprite.uv1.y},
+                           {sprite.uv1.x, sprite.uv1.y}};
+
+    if (sprite.is_custom_quad) {
+        for (u32 i = 0; i < 4; i++) {
+            verts[i * 8 + 0] = sprite.quad_pts[i].x;
+            verts[i * 8 + 1] = sprite.quad_pts[i].y;
+            verts[i * 8 + 2] = uvs[i][0];
+            verts[i * 8 + 3] = uvs[i][1];
+            verts[i * 8 + 4] = sprite.color.r;
+            verts[i * 8 + 5] = sprite.color.g;
+            verts[i * 8 + 6] = sprite.color.b;
+            verts[i * 8 + 7] = sprite.color.a;
+        }
+        return;
+    }
+
     f32 hx = sprite.size.x * 0.5f;
     f32 hy = sprite.size.y * 0.5f;
     f32 c = cosf(sprite.rotation);
     f32 s = sinf(sprite.rotation);
 
     const f32 local[4][2] = {{-hx, -hy}, {hx, -hy}, {-hx, hy}, {hx, hy}};
-    const f32 uvs[4][2] = {{sprite.uv0.x, sprite.uv0.y},
-                           {sprite.uv1.x, sprite.uv0.y},
-                           {sprite.uv0.x, sprite.uv1.y},
-                           {sprite.uv1.x, sprite.uv1.y}};
 
     for (u32 i = 0; i < 4; i++) {
         f32 rx = local[i][0] * c - local[i][1] * s;
@@ -190,26 +231,30 @@ void SpriteBatch::render(rhi::RHICommandEncoder* encoder, const Mat4& vp) {
 
     device_->update_buffer(uniform_buffer_.get(), 0, vp.m, sizeof(vp.m));
 
-    std::vector<Sprite> sorted = sprites_;
-    std::stable_sort(sorted.begin(), sorted.end(), [](const Sprite& a, const Sprite& b) {
-        return a.layer < b.layer;
+    const u32 total = std::min(static_cast<u32>(sprites_.size()), kMaxSprites);
+
+    // 按层排序索引 (不整块拷贝 Sprite, 避免每帧 shared_ptr 引用计数抖动)
+    sort_scratch_.resize(total);
+    for (u32 i = 0; i < total; i++) sort_scratch_[i] = i;
+    std::stable_sort(sort_scratch_.begin(), sort_scratch_.end(), [&](u32 a, u32 b) {
+        return sprites_[a].layer < sprites_[b].layer;
     });
 
-    const u32 total = static_cast<u32>(sorted.size());
     const u32 floats_per_sprite = kVerticesPerSprite * kFloatsPerVertex;
-    std::vector<f32> vertices((size_t)total * floats_per_sprite);
+    vertex_scratch_.resize((size_t)total * floats_per_sprite);
     for (u32 i = 0; i < total; i++) {
-        build_quad(sorted[i], &vertices[(size_t)i * floats_per_sprite]);
+        build_quad(sprites_[sort_scratch_[i]], &vertex_scratch_[(size_t)i * floats_per_sprite]);
     }
-    device_->update_buffer(vertex_buffer_.get(), 0, vertices.data(),
+    device_->update_buffer(vertex_buffer_.get(), 0, vertex_scratch_.data(),
                            (u64)total * floats_per_sprite * sizeof(f32));
 
     u32 start = 0;
     while (start < total) {
-        const Sprite& first = sorted[start];
+        const Sprite& first = sprites_[sort_scratch_[start]];
         u32 end = start + 1;
-        while (end < total && sorted[end].texture.get() == first.texture.get() &&
-               sorted[end].blend == first.blend) {
+        while (end < total) {
+            const Sprite& next = sprites_[sort_scratch_[end]];
+            if (next.texture.get() != first.texture.get() || next.blend != first.blend) break;
             end++;
         }
 

@@ -126,10 +126,23 @@ bool Renderer2D::begin_frame() {
     color_attach.clear_color[2] = clear_color_[2];
     color_attach.clear_color[3] = clear_color_[3];
 
+    rhi::RenderPassDepthAttachment depth_attach;
+    depth_attach.view = nullptr;
+    if (swapchain_->depth_format() != rhi::Format::Undefined) {
+        depth_attach.view = swapchain_->get_depth_view();
+    }
+
     rhi::RenderPassDesc rp_desc;
     rp_desc.color_attachment_count = 1;
     rp_desc.color_attachments = &color_attach;
-    rp_desc.depth_attachment = nullptr;
+    if (depth_attach.view) {
+        depth_attach.load_op = rhi::LoadOp::Clear;
+        depth_attach.store_op = rhi::StoreOp::Store;
+        depth_attach.clear_depth = 1.0f;
+        rp_desc.depth_attachment = &depth_attach;
+    } else {
+        rp_desc.depth_attachment = nullptr;
+    }
 
     encoder_->begin_render_pass(rp_desc);
     sprite_batch_.clear();

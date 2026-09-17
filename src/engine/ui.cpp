@@ -1,4 +1,8 @@
 #include "engine/ui.h"
+#include "engine/input.h"
+#include "engine/renderer2d.h"
+#include "engine/texture.h"
+#include "platform/platform.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -6,9 +10,7 @@
 #else
 #define NOMINMAX
 #include <windows.h>
-#include "engine/renderer2d.h"
-#include "engine/texture.h"
-#include "platform/platform.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -19,6 +21,9 @@
 namespace aether::engine::ui {
 
 namespace {
+
+Theme g_theme;
+Renderer2D* g_current_renderer = nullptr;
 
 #ifdef __EMSCRIPTEN__
 
@@ -105,18 +110,15 @@ DomBackend s_dom_backend;
 
 #else
 
-constexpr u32 kAtlasCell = 56;
-constexpr u32 kAtlasCols = 16;
-constexpr u32 kAtlasRows = 6;
+constexpr u32 kAtlasCell = 44;
+constexpr u32 kAtlasCols = 32;
+constexpr u32 kAtlasRows = 32;
 constexpr u32 kAtlasWidth = kAtlasCols * kAtlasCell;
 constexpr u32 kAtlasHeight = kAtlasRows * kAtlasCell;
-constexpr u32 kAtlasFontPx = 36;
+constexpr u32 kAtlasFontPx = 30;
 constexpr u32 kAtlasPad = (kAtlasCell - kAtlasFontPx) / 2;
 
-constexpr i32 kLayerHud = 20;
-constexpr i32 kLayerBoss = 21;
-constexpr i32 kLayerPanel = 30;
-constexpr i32 kLayerFlash = 35;
+constexpr i32 kLayerFlash = 38;
 
 struct GlyphInfo {
     u32 uv_x = 0;
@@ -130,6 +132,13 @@ struct GlyphInfo {
 
 class NativeBackend : public Backend {
 public:
+    NativeBackend() = default;
+    ~NativeBackend() {
+        if (font_) DeleteObject(font_);
+        if (dib_) DeleteObject(dib_);
+        if (mem_dc_) DeleteDC(mem_dc_);
+    }
+
     void set_text(const char* element, const char* text) override {
         text_map_[element] = text;
     }
@@ -145,127 +154,23 @@ public:
         flash_duration_ = duration > 0.0f ? duration : 1.5f;
     }
 
-    void draw(aether::engine::Renderer2D* renderer) override {
+    const char* get_text(const char* key, const char* fallback) override {
+        auto it = text_map_.find(key);
+        return it != text_map_.end() ? it->second.c_str() : fallback;
+    }
+    bool is_visible(const char* key, bool fallback) override {
+        auto it = visible_map_.find(key);
+        return it != visible_map_.end() ? it->second : fallback;
+    }
+    f32 get_fill(const char* key, f32 fallback) override {
+        auto it = fill_map_.find(key);
+        return it != fill_map_.end() ? it->second : fallback;
+    }
+
+    void draw(Renderer2D* renderer) override {
         if (!renderer || !renderer->device()) return;
         ensure_assets(renderer);
         if (!atlas_) return;
-
-        auto& batch = renderer->sprites();
-        f32 half_h = 360.0f;
-        f32 half_w = half_h * renderer->aspect();
-        Vec2 cam = renderer->camera().position;
-        auto sx = [&](f32 x) { return (x - half_w) + cam.x; };
-        auto sy = [&](f32 y) { return (y - half_h) + cam.y; };
-
-        auto draw_text = [&](const char* text, f32 x, f32 y, f32 px, f32 spacing,
-                             const Color& col, i32 layer, bool centered = true, f32 glow = 0.0f) {
-            draw_text_impl(batch, text, sx(x), sy(y), px, spacing, col, layer, centered, glow);
-        };
-        auto rect = [&](f32 x, f32 y, f32 w, f32 h, const Color& col, i32 layer,
-                        rhi::BlendMode blend = rhi::BlendMode::Alpha) {
-            if (w <= 0.0f || h <= 0.0f) return;
-            batch.add(solid_, {sx(x) + w * 0.5f, sy(y) + h * 0.5f}, {w, h}, col, 0.0f, layer, blend);
-        };
-        auto overlay = [&]() {
-            rect(0.0f, 0.0f, half_w * 2.0f, half_h * 2.0f, color(0.0f, 0.0f, 0.0f, 0.8f), kLayerPanel);
-            batch.add(glow_, {sx(half_w), sy(half_h)}, {half_w * 2.6f, half_w * 2.6f},
-                      color(0.04f, 0.10f, 0.28f, 0.6f), 0.0f, kLayerPanel);
-        };
-
-        const char* label = "SCORE";
-        const char* key = "hud-score";
-
-        struct HudGroup {
-            const char* label;
-            const char* key;
-        };
-        const HudGroup groups[] = {
-            {"SCORE", "hud-score"},
-            {"HI-SCORE", "hud-hiscore"},
-            {"LIVES", "hud-lives"},
-            {"WEAPON", "hud-weapon"},
-        };
-        f32 gx = 20.0f;
-        for (const auto& g : groups) {
-            const char* value = get_text(g.key, "0");
-            f32 gw = measure(g.label, 12.0f, 0.0f);
-            f32 vw = measure(value, 26.0f, 0.0f);
-            if (vw > gw) gw = vw;
-            draw_text(g.label, gx, 14.0f, 12.0f, 0.0f, color(0.50f, 0.72f, 0.91f, 1.0f),
-                      kLayerHud, false, 0.25f);
-            draw_text(value, gx, 36.0f, 26.0f, 0.0f, color(0.81f, 0.91f, 1.0f, 1.0f),
-                      kLayerHud, false, 0.35f);
-            gx += gw + 28.0f;
-        }
-
-        if (visible("hud-boss", false)) {
-            const char* name = get_text("boss-name", "BOSS");
-            draw_text(name, half_w, 12.0f, 14.0f, 4.0f, color(1.0f, 0.82f, 0.82f, 1.0f),
-                      kLayerBoss, true, 0.6f);
-            f32 bar_x = half_w - 280.0f;
-            f32 bar_y = 36.0f;
-            f32 bar_w = 560.0f;
-            f32 bar_h = 14.0f;
-            f32 ratio = fill("boss-fill", 1.0f);
-            if (ratio < 0.0f) ratio = 0.0f;
-            if (ratio > 1.0f) ratio = 1.0f;
-            rect(bar_x, bar_y, bar_w, bar_h, color(0.16f, 0.0f, 0.0f, 0.7f), kLayerBoss);
-            rect(bar_x, bar_y, bar_w, 2.0f, color(1.0f, 0.31f, 0.31f, 0.8f), kLayerBoss);
-            rect(bar_x, bar_y + bar_h - 2.0f, bar_w, 2.0f, color(1.0f, 0.31f, 0.31f, 0.8f), kLayerBoss);
-            rect(bar_x, bar_y, 2.0f, bar_h, color(1.0f, 0.31f, 0.31f, 0.8f), kLayerBoss);
-            rect(bar_x + bar_w - 2.0f, bar_y, 2.0f, bar_h, color(1.0f, 0.31f, 0.31f, 0.8f), kLayerBoss);
-            f32 fill_w = (bar_w - 4.0f) * ratio;
-            if (fill_w > 0.0f) {
-                rect(bar_x + 2.0f, bar_y + 2.0f, fill_w, bar_h - 4.0f, color(0.95f, 0.28f, 0.16f, 1.0f), kLayerBoss);
-                rect(bar_x + 2.0f, bar_y + 2.0f, fill_w, bar_h - 4.0f, color(1.0f, 0.48f, 0.43f, 0.25f), kLayerBoss, rhi::BlendMode::Additive);
-            }
-        }
-
-        if (visible("panel-title", true)) {
-            overlay();
-            draw_text("AETHER STRIKE", half_w, 250.0f, 64.0f, 10.0f, color(0.75f, 0.90f, 1.0f, 1.0f),
-                      kLayerPanel, true, 0.6f);
-            draw_text("VECTOR ASSAULT PROTOCOL", half_w, 330.0f, 18.0f, 3.0f,
-                      color(0.62f, 0.83f, 1.0f, 1.0f), kLayerPanel, true, 0.3f);
-            draw_text("MOVE: W A S D / ARROWS", half_w, 395.0f, 15.0f, 1.0f,
-                      color(0.44f, 0.63f, 0.78f, 1.0f), kLayerPanel);
-            draw_text("FIRE: J / SPACE   SLOW: SHIFT   PAUSE: P", half_w, 425.0f, 15.0f, 1.0f,
-                      color(0.44f, 0.63f, 0.78f, 1.0f), kLayerPanel);
-            draw_text("GAMEPAD: STICK / D-PAD MOVE   RT FIRE   LT SLOW   START PAUSE", half_w, 455.0f,
-                      15.0f, 1.0f, color(0.44f, 0.63f, 0.78f, 1.0f), kLayerPanel);
-            const char* btn = "PRESS ENTER TO START";
-            f32 pulse = 1.0f + 0.06f * sinf((f32)aether::platform::now_seconds() * 3.93f);
-            f32 bw = measure(btn, 18.0f, 3.0f) * pulse + 68.0f;
-            f32 bh = 40.0f * pulse;
-            rect(half_w - bw * 0.5f, 505.0f - bh * 0.5f, bw, bh, color(0.75f, 0.90f, 1.0f, 0.9f), kLayerPanel);
-            rect(half_w - bw * 0.5f, 505.0f - bh * 0.5f, bw, bh, color(0.0f, 0.78f, 1.0f, 0.3f), kLayerPanel, rhi::BlendMode::Additive);
-            draw_text(btn, half_w, 505.0f, 18.0f, 3.0f, color(0.04f, 0.08f, 0.13f, 1.0f), kLayerPanel, true);
-        }
-        if (visible("panel-pause", false)) {
-            overlay();
-            draw_text("PAUSED", half_w, 290.0f, 46.0f, 8.0f, color(1.0f, 0.85f, 0.63f, 1.0f),
-                      kLayerPanel, true, 0.5f);
-            draw_text("PRESS P TO RESUME", half_w, 370.0f, 18.0f, 3.0f,
-                      color(0.62f, 0.83f, 1.0f, 1.0f), kLayerPanel);
-        }
-        if (visible("panel-gameover", false)) {
-            overlay();
-            draw_text("GAME OVER", half_w, 290.0f, 46.0f, 8.0f, color(1.0f, 0.85f, 0.63f, 1.0f),
-                      kLayerPanel, true, 0.5f);
-            draw_text(get_text("gameover-score", "SCORE 0"), half_w, 370.0f, 20.0f, 2.0f,
-                      color(0.91f, 0.96f, 1.0f, 1.0f), kLayerPanel, true, 0.3f);
-            draw_text("PRESS ENTER TO RETRY", half_w, 430.0f, 15.0f, 1.0f,
-                      color(0.44f, 0.63f, 0.78f, 1.0f), kLayerPanel);
-        }
-        if (visible("panel-win", false)) {
-            overlay();
-            draw_text("MISSION COMPLETE", half_w, 290.0f, 46.0f, 8.0f, color(1.0f, 0.85f, 0.63f, 1.0f),
-                      kLayerPanel, true, 0.5f);
-            draw_text(get_text("win-score", "SCORE 0"), half_w, 370.0f, 20.0f, 2.0f,
-                      color(0.91f, 0.96f, 1.0f, 1.0f), kLayerPanel, true, 0.3f);
-            draw_text("PRESS ENTER TO PLAY AGAIN", half_w, 430.0f, 15.0f, 1.0f,
-                      color(0.44f, 0.63f, 0.78f, 1.0f), kLayerPanel);
-        }
 
         if (!flash_text_.empty()) {
             double now = aether::platform::now_seconds();
@@ -276,40 +181,222 @@ public:
                                 ? 1.0f
                                 : (f32)(1.0 - (fade - flash_duration_) / 0.5);
                 const char* flash = flash_text_.c_str();
-                draw_text(flash, half_w, 274.0f, 42.0f, 8.0f, color(1.0f, 0.86f, 0.47f, alpha * 0.8f),
-                          kLayerFlash, true, 0.0f);
-                draw_text(flash, half_w, 274.0f, 42.0f, 8.0f, color(1.0f, 1.0f, 1.0f, alpha),
-                          kLayerFlash, true, 0.0f);
+                f32 half_w = 360.0f * renderer->aspect();
+                draw_text_screen(renderer, flash, half_w, 274.0f, 38.0f, 6.0f, color(1.0f, 0.86f, 0.47f, alpha * 0.8f),
+                                 kLayerFlash, true, 0.4f);
+                draw_text_screen(renderer, flash, half_w, 274.0f, 38.0f, 6.0f, color(1.0f, 1.0f, 1.0f, alpha),
+                                 kLayerFlash, true, 0.0f);
             } else {
                 flash_text_.clear();
             }
         }
     }
 
-private:
-    const char* get_text(const char* key, const char* fallback) {
-        auto it = text_map_.find(key);
-        return it != text_map_.end() ? it->second.c_str() : fallback;
-    }
-    bool visible(const char* key, bool fallback) {
-        auto it = visible_map_.find(key);
-        return it != visible_map_.end() ? it->second : fallback;
-    }
-    f32 fill(const char* key, f32 fallback) {
-        auto it = fill_map_.find(key);
-        return it != fill_map_.end() ? it->second : fallback;
+    void draw_rect_screen(Renderer2D* renderer, const Rect& r, const Color& col, i32 layer,
+                          rhi::BlendMode blend = rhi::BlendMode::Alpha) {
+        if (!renderer || !renderer->device() || r.w <= 0.0f || r.h <= 0.0f) return;
+        ensure_assets(renderer);
+        if (!solid_) return;
+
+        f32 half_h = 360.0f;
+        f32 half_w = half_h * renderer->aspect();
+        Vec2 cam = renderer->camera().position;
+        f32 sx = (r.x - half_w) + cam.x + r.w * 0.5f;
+        f32 sy = (r.y - half_h) + cam.y + r.h * 0.5f;
+
+        renderer->sprites().add(solid_, {sx, sy}, {r.w, r.h}, col, 0.0f, layer, blend);
     }
 
-    void ensure_assets(aether::engine::Renderer2D* renderer) {
-        if (atlas_) return;
+    void draw_glow_screen(Renderer2D* renderer, const Rect& r, const Color& col, i32 layer) {
+        if (!renderer || !renderer->device() || r.w <= 0.0f || r.h <= 0.0f) return;
+        ensure_assets(renderer);
+        if (!glow_) return;
+
+        f32 half_h = 360.0f;
+        f32 half_w = half_h * renderer->aspect();
+        Vec2 cam = renderer->camera().position;
+        f32 sx = (r.x - half_w) + cam.x + r.w * 0.5f;
+        f32 sy = (r.y - half_h) + cam.y + r.h * 0.5f;
+
+        renderer->sprites().add(glow_, {sx, sy}, {r.w * 1.5f, r.h * 1.5f}, col, 0.0f, layer, rhi::BlendMode::Additive);
+    }
+
+    void ensure_glyph(rhi::RHIDevice* device, wchar_t wc) {
+        if (glyph_map_.find(wc) != glyph_map_.end()) return;
+        if (!mem_dc_ || next_slot_ >= kAtlasCols * kAtlasRows) return;
+
+        u32 slot = next_slot_++;
+        u32 col = slot % kAtlasCols;
+        u32 row = slot / kAtlasCols;
+        u32 x0 = col * kAtlasCell;
+        u32 y0 = row * kAtlasCell;
+
+        wchar_t str[2] = {wc, 0};
+        SetTextColor(mem_dc_, RGB(255, 255, 255));
+        TextOutW(mem_dc_, (LONG)x0 + 2, (LONG)y0 + kAtlasPad, str, 1);
+
+        SIZE s = {};
+        GetTextExtentPoint32W(mem_dc_, str, 1, &s);
+
+        const u8* bgra = (const u8*)dib_bits_;
+        u32 min_x = kAtlasCell, max_x = 0, min_y = kAtlasCell, max_y = 0;
+        for (u32 yy = 0; yy < kAtlasCell; yy++) {
+            for (u32 xx = 0; xx < kAtlasCell; xx++) {
+                u32 idx = ((y0 + yy) * kAtlasWidth + (x0 + xx)) * 4;
+                u8 lum = bgra[idx + 1];
+                rgba_[idx + 0] = 255;
+                rgba_[idx + 1] = 255;
+                rgba_[idx + 2] = 255;
+                rgba_[idx + 3] = lum;
+                if (lum > 0) {
+                    if (xx < min_x) min_x = xx;
+                    if (xx > max_x) max_x = xx;
+                    if (yy < min_y) min_y = yy;
+                    if (yy > max_y) max_y = yy;
+                }
+            }
+        }
+
+        GlyphInfo g;
+        g.uv_x = x0;
+        g.uv_y = y0;
+        g.advance = (u32)s.cx + 1;
+        if (max_x >= min_x && max_y >= min_y) {
+            g.bb_x = min_x;
+            g.bb_y = min_y;
+            g.bb_w = max_x - min_x + 1;
+            g.bb_h = max_y - min_y + 1;
+        }
+        glyph_map_[wc] = g;
+        atlas_dirty_ = true;
+    }
+
+    std::wstring to_wstring(const char* text) {
+        if (!text || !*text) return L"";
+        int len = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+        if (len <= 1) return L"";
+        std::wstring wstr(len - 1, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, text, -1, &wstr[0], len);
+        return wstr;
+    }
+
+    void draw_text_screen(Renderer2D* renderer, const char* text, f32 screen_x, f32 screen_y,
+                          f32 px, f32 spacing, const Color& col, i32 layer, bool centered, f32 glow) {
+        if (!renderer || !renderer->device() || !text || !*text) return;
+        ensure_assets(renderer);
+
+        std::wstring wtext = to_wstring(text);
+        if (wtext.empty()) return;
+
+        for (wchar_t wc : wtext) {
+            ensure_glyph(renderer->device(), wc);
+        }
+
+        if (atlas_dirty_) {
+            atlas_ = make_texture(renderer->device(), kAtlasWidth, kAtlasHeight,
+                                  [this](u32 x, u32 y, u8 out[4]) {
+                                      u32 idx = (y * kAtlasWidth + x) * 4;
+                                      out[0] = rgba_[idx + 0];
+                                      out[1] = rgba_[idx + 1];
+                                      out[2] = rgba_[idx + 2];
+                                      out[3] = rgba_[idx + 3];
+                                  });
+            atlas_dirty_ = false;
+        }
+
+        if (!atlas_) return;
+
+        f32 half_h = 360.0f;
+        f32 half_w = half_h * renderer->aspect();
+        Vec2 cam = renderer->camera().position;
+        f32 world_x = (screen_x - half_w) + cam.x;
+        f32 world_y = (screen_y - half_h) + cam.y;
+
+        f32 scale = px / (f32)kAtlasFontPx;
+        f32 total = measure(text, px, spacing);
+        f32 x = centered ? world_x - total * 0.5f : world_x;
+        f32 y = world_y;
+
+        f32 ink_top = 1e30f, ink_bottom = -1e30f;
+        for (wchar_t wc : wtext) {
+            auto it = glyph_map_.find(wc);
+            if (it == glyph_map_.end()) continue;
+            const GlyphInfo& g = it->second;
+            if (g.bb_w == 0 || g.bb_h == 0) continue;
+            if ((f32)g.bb_y < ink_top) ink_top = (f32)g.bb_y;
+            if ((f32)(g.bb_y + g.bb_h) > ink_bottom) ink_bottom = (f32)(g.bb_y + g.bb_h);
+        }
+        f32 ink_center = (ink_top + ink_bottom) * 0.5f;
+
+        for (wchar_t wc : wtext) {
+            auto it = glyph_map_.find(wc);
+            if (it != glyph_map_.end()) {
+                const GlyphInfo& g = it->second;
+                if (g.bb_w > 0 && g.bb_h > 0) {
+                    f32 x_mid_orig = (f32)g.bb_x + (f32)g.bb_w * 0.5f;
+                    f32 y_mid_orig = (f32)g.bb_y + (f32)g.bb_h * 0.5f;
+                    f32 cx = x + x_mid_orig * scale;
+                    f32 cy = y + (y_mid_orig - ink_center) * scale;
+                    f32 w = (f32)g.bb_w * scale;
+                    f32 h = (f32)g.bb_h * scale;
+
+                    f32 u0 = (f32)(g.uv_x + g.bb_x) / (f32)kAtlasWidth;
+                    f32 v0 = (f32)(g.uv_y + g.bb_y) / (f32)kAtlasHeight;
+                    f32 u1 = u0 + (f32)g.bb_w / (f32)kAtlasWidth;
+                    f32 v1 = v0 + (f32)g.bb_h / (f32)kAtlasHeight;
+
+                    if (glow > 0.0f && glow_) {
+                        Color glow_col = col;
+                        glow_col.a = glow * col.a * 0.4f;
+                        renderer->sprites().add_uv(atlas_, {u0, v0}, {u1, v1}, {cx, cy}, {w * 1.3f, h * 1.3f},
+                                                   glow_col, 0.0f, layer - 1, rhi::BlendMode::Additive);
+                    }
+
+                    renderer->sprites().add_uv(atlas_, {u0, v0}, {u1, v1}, {cx, cy}, {w, h},
+                                               col, 0.0f, layer, rhi::BlendMode::Alpha);
+                }
+                x += (f32)g.advance * scale + spacing;
+            } else {
+                x += px * 0.6f + spacing;
+            }
+        }
+    }
+
+    f32 measure(const char* text, f32 px, f32 spacing) {
+        std::wstring wtext = to_wstring(text);
+        if (wtext.empty()) return 0.0f;
+
+        f32 scale = px / (f32)kAtlasFontPx;
+        f32 total = 0.0f;
+        u32 n = 0;
+        for (wchar_t wc : wtext) {
+            auto it = glyph_map_.find(wc);
+            if (it != glyph_map_.end()) {
+                total += (f32)it->second.advance * scale;
+            } else {
+                total += (wc > 128 ? px * 0.95f : px * 0.55f);
+            }
+            n++;
+        }
+        if (n > 1) total += spacing * (f32)(n - 1);
+        return total;
+    }
+
+private:
+    void ensure_assets(Renderer2D* renderer) {
+        if (mem_dc_) return;
         build_atlas(renderer->device());
-        solid_ = aether::engine::make_solid_texture(renderer->device(), 4, 4, {1.0f, 1.0f, 1.0f, 1.0f});
-        glow_ = aether::engine::make_glow_texture(renderer->device(), 256);
+        solid_ = make_solid_texture(renderer->device(), 4, 4, {1.0f, 1.0f, 1.0f, 1.0f});
+        glow_ = make_glow_texture(renderer->device(), 256);
     }
 
     bool build_atlas(rhi::RHIDevice* device) {
-        HDC mem = CreateCompatibleDC(nullptr);
-        if (!mem) return false;
+        build_in_progress_ = true;
+        mem_dc_ = CreateCompatibleDC(nullptr);
+        if (!mem_dc_) {
+            build_in_progress_ = false;
+            return false;
+        }
 
         BITMAPINFO bi = {};
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -319,161 +406,53 @@ private:
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
 
-        void* bits = nullptr;
-        HBITMAP dib = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-        if (!dib) {
-            DeleteDC(mem);
+        dib_ = CreateDIBSection(mem_dc_, &bi, DIB_RGB_COLORS, &dib_bits_, nullptr, 0);
+        if (!dib_) {
+            DeleteDC(mem_dc_);
+            mem_dc_ = nullptr;
+            build_in_progress_ = false;
             return false;
         }
-        HGDIOBJ old = SelectObject(mem, dib);
+        SelectObject(mem_dc_, dib_);
 
         HBRUSH bg = CreateSolidBrush(RGB(0, 0, 0));
         RECT full = {0, 0, (LONG)kAtlasWidth, (LONG)kAtlasHeight};
-        FillRect(mem, &full, bg);
+        FillRect(mem_dc_, &full, bg);
         DeleteObject(bg);
 
-        HFONT font = CreateFontA(-(LONG)kAtlasFontPx, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 ANTIALIASED_QUALITY, DEFAULT_PITCH, "Segoe UI");
-        SelectObject(mem, font);
+        font_ = CreateFontW(-(LONG)kAtlasFontPx, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
+        SelectObject(mem_dc_, font_);
 
-        SetBkMode(mem, TRANSPARENT);
-        SetTextAlign(mem, TA_TOP | TA_LEFT);
-        LONG cell_pad = (LONG)kAtlasPad;
+        SetBkMode(mem_dc_, TRANSPARENT);
+        SetTextAlign(mem_dc_, TA_TOP | TA_LEFT);
 
+        rgba_.assign(kAtlasWidth * kAtlasHeight * 4, 0);
+
+        // Pre-populate ASCII printable range (32..126)
         for (u32 i = 0; i < 95; i++) {
-            u32 c = i + 32;
-            u32 col = i % kAtlasCols;
-            u32 row = i / kAtlasCols;
-            char ch[2] = {(char)c, 0};
-            SetTextColor(mem, RGB(255, 255, 255));
-            TextOutA(mem, (LONG)(col * kAtlasCell) + 2, (LONG)(row * kAtlasCell) + cell_pad, ch, 1);
-            SIZE s = {};
-            GetTextExtentPoint32A(mem, ch, 1, &s);
-            glyphs_[i].uv_x = col * kAtlasCell;
-            glyphs_[i].uv_y = row * kAtlasCell;
-            glyphs_[i].advance = (u32)s.cx + 1;
+            ensure_glyph(device, (wchar_t)(i + 32));
         }
 
-        rgba_.resize(kAtlasWidth * kAtlasHeight * 4);
-        const u8* bgra = (const u8*)bits;
-        for (u32 y = 0; y < kAtlasHeight; y++) {
-            for (u32 x = 0; x < kAtlasWidth; x++) {
-                u32 idx = (y * kAtlasWidth + x) * 4;
-                u8 lum = bgra[idx + 1];
-                rgba_[idx + 0] = 255;
-                rgba_[idx + 1] = 255;
-                rgba_[idx + 2] = 255;
-                rgba_[idx + 3] = lum;
-            }
-        }
+        atlas_ = make_texture(device, kAtlasWidth, kAtlasHeight,
+                              [this](u32 x, u32 y, u8 out[4]) {
+                                  u32 idx = (y * kAtlasWidth + x) * 4;
+                                  out[0] = rgba_[idx + 0];
+                                  out[1] = rgba_[idx + 1];
+                                  out[2] = rgba_[idx + 2];
+                                  out[3] = rgba_[idx + 3];
+                              });
 
-        for (u32 i = 0; i < 95; i++) {
-            u32 col = i % kAtlasCols;
-            u32 row = i / kAtlasCols;
-            u32 x0 = col * kAtlasCell;
-            u32 y0 = row * kAtlasCell;
-            u32 min_x = kAtlasCell, max_x = 0, min_y = kAtlasCell, max_y = 0;
-            for (u32 yy = 0; yy < kAtlasCell; yy++) {
-                for (u32 xx = 0; xx < kAtlasCell; xx++) {
-                    u32 idx = ((y0 + yy) * kAtlasWidth + (x0 + xx)) * 4;
-                    if (rgba_[idx + 3] > 0) {
-                        if (xx < min_x) min_x = xx;
-                        if (xx > max_x) max_x = xx;
-                        if (yy < min_y) min_y = yy;
-                        if (yy > max_y) max_y = yy;
-                    }
-                }
-            }
-            if (max_x >= min_x && max_y >= min_y) {
-                glyphs_[i].bb_x = min_x;
-                glyphs_[i].bb_y = min_y;
-                glyphs_[i].bb_w = max_x - min_x + 1;
-                glyphs_[i].bb_h = max_y - min_y + 1;
-            } else {
-                glyphs_[i].bb_w = 0;
-                glyphs_[i].bb_h = 0;
-            }
-        }
-
-        atlas_ = aether::engine::make_texture(device, kAtlasWidth, kAtlasHeight,
-                                              [this](u32 x, u32 y, u8 out[4]) {
-                                                  u32 idx = (y * kAtlasWidth + x) * 4;
-                                                  out[0] = rgba_[idx + 0];
-                                                  out[1] = rgba_[idx + 1];
-                                                  out[2] = rgba_[idx + 2];
-                                                  out[3] = rgba_[idx + 3];
-                                              });
-
-        DeleteObject(font);
-        SelectObject(mem, old);
-        DeleteObject(dib);
-        DeleteDC(mem);
+        atlas_dirty_ = false;
+        build_in_progress_ = false;
         return atlas_ != nullptr;
-    }
-
-    f32 measure(const char* text, f32 px, f32 spacing) {
-        if (!atlas_) return 0.0f;
-        f32 scale = px / (f32)kAtlasFontPx;
-        f32 total = 0.0f;
-        u32 n = 0;
-        for (const char* p = text; *p; p++) {
-            u32 c = (u8)*p;
-            if (c < 32 || c > 126) c = '?';
-            total += (f32)glyphs_[c - 32].advance;
-            n++;
-        }
-        if (n > 1) total += spacing * (f32)(n - 1);
-        return total * scale;
-    }
-
-    void draw_text_impl(aether::engine::SpriteBatch& batch, const char* text, f32 world_x, f32 world_y,
-                        f32 px, f32 spacing, const Color& col, i32 layer, bool centered, f32 glow) {
-        f32 scale = px / (f32)kAtlasFontPx;
-        f32 total = measure(text, px, spacing);
-        f32 x = centered ? world_x - total * 0.5f : world_x;
-        f32 y = world_y;
-
-        f32 ink_top = 1e30f, ink_bottom = -1e30f;
-        for (const char* p = text; *p; p++) {
-            u32 c = (u8)*p;
-            if (c < 32 || c > 126) c = '?';
-            const GlyphInfo& g = glyphs_[c - 32];
-            if (g.bb_w == 0 || g.bb_h == 0) continue;
-            if ((f32)g.bb_y < ink_top) ink_top = (f32)g.bb_y;
-            if ((f32)(g.bb_y + g.bb_h) > ink_bottom) ink_bottom = (f32)(g.bb_y + g.bb_h);
-        }
-        f32 ink_center = (ink_top + ink_bottom) * 0.5f;
-
-        for (const char* p = text; *p; p++) {
-            u32 c = (u8)*p;
-            if (c < 32 || c > 126) c = '?';
-            const GlyphInfo& g = glyphs_[c - 32];
-            if (g.bb_w == 0 || g.bb_h == 0) {
-                x += ((f32)g.advance + spacing) * scale;
-                continue;
-            }
-            f32 gw = (f32)g.bb_w * scale;
-            f32 gh = (f32)g.bb_h * scale;
-            Vec2 uv0{(f32)(g.uv_x + g.bb_x) / (f32)kAtlasWidth,
-                     (f32)(g.uv_y + g.bb_y) / (f32)kAtlasHeight};
-            Vec2 uv1{(f32)(g.uv_x + g.bb_x + g.bb_w) / (f32)kAtlasWidth,
-                     (f32)(g.uv_y + g.bb_y + g.bb_h) / (f32)kAtlasHeight};
-            f32 glyph_y = y + ((f32)g.bb_y - ink_center) * scale;
-            Vec2 center{x + gw * 0.5f, glyph_y + gh * 0.5f};
-            Vec2 size{gw, gh};
-            if (glow > 0.0f) {
-                batch.add_uv(atlas_, uv0, uv1, center, size, color(col.r, col.g, col.b, col.a * glow),
-                             0.0f, layer, rhi::BlendMode::Additive);
-            }
-            batch.add_uv(atlas_, uv0, uv1, center, size, col, 0.0f, layer);
-            x += ((f32)g.advance + spacing) * scale;
-        }
     }
 
     std::map<std::string, std::string> text_map_;
     std::map<std::string, bool> visible_map_;
     std::map<std::string, f32> fill_map_;
+
     std::string flash_text_;
     double flash_start_ = 0.0;
     f32 flash_duration_ = 1.5f;
@@ -481,49 +460,248 @@ private:
     std::shared_ptr<rhi::RHITexture> atlas_;
     std::shared_ptr<rhi::RHITexture> solid_;
     std::shared_ptr<rhi::RHITexture> glow_;
-    GlyphInfo glyphs_[95] = {};
     std::vector<u8> rgba_;
+    std::map<wchar_t, GlyphInfo> glyph_map_;
+    u32 next_slot_ = 0;
+    bool atlas_dirty_ = false;
+    bool build_in_progress_ = false;
+
+    HDC mem_dc_ = nullptr;
+    HBITMAP dib_ = nullptr;
+    HFONT font_ = nullptr;
+    void* dib_bits_ = nullptr;
 };
 
 NativeBackend s_native_backend;
 
 #endif
 
-}  // namespace
+Backend* s_backend = nullptr;
 
-Backend* g_backend = nullptr;
+Backend* active_backend() {
+    if (s_backend) return s_backend;
+#ifdef __EMSCRIPTEN__
+    return &s_dom_backend;
+#else
+    return &s_native_backend;
+#endif
+}
+
+} // namespace
 
 void init() {
 #ifdef __EMSCRIPTEN__
     js_ui_init();
-    if (!g_backend) g_backend = &s_dom_backend;
-#else
-    if (!g_backend) g_backend = &s_native_backend;
 #endif
 }
 
 void set_backend(Backend* backend) {
-    g_backend = backend;
+    s_backend = backend;
 }
 
-void set_text(const char* element, const char* text) {
-    if (g_backend) g_backend->set_text(element, text);
+Theme& get_theme() {
+    return g_theme;
 }
 
-void set_visible(const char* element, bool visible) {
-    if (g_backend) g_backend->set_visible(element, visible);
+void begin_frame(Renderer2D* renderer) {
+    g_current_renderer = renderer;
 }
 
-void set_fill(const char* element, f32 ratio) {
-    if (g_backend) g_backend->set_fill(element, ratio);
+void end_frame() {
+    g_current_renderer = nullptr;
+}
+
+void draw_rect(const Rect& r, const Color& col, i32 layer, rhi::BlendMode blend) {
+#ifndef __EMSCRIPTEN__
+    s_native_backend.draw_rect_screen(g_current_renderer, r, col, layer, blend);
+#endif
+}
+
+void draw_rect_outline(const Rect& r, f32 thickness, const Color& col, i32 layer) {
+#ifndef __EMSCRIPTEN__
+    if (r.w <= 0.0f || r.h <= 0.0f || thickness <= 0.0f) return;
+    // Top, bottom, left, right borders
+    draw_rect({r.x, r.y, r.w, thickness}, col, layer);
+    draw_rect({r.x, r.y + r.h - thickness, r.w, thickness}, col, layer);
+    draw_rect({r.x, r.y + thickness, thickness, r.h - thickness * 2.0f}, col, layer);
+    draw_rect({r.x + r.w - thickness, r.y + thickness, thickness, r.h - thickness * 2.0f}, col, layer);
+#endif
+}
+
+void draw_panel(const Rect& r, const char* title, const Color* bg, const Color* border, i32 layer) {
+#ifndef __EMSCRIPTEN__
+    Color bg_col = bg ? *bg : g_theme.bg_panel;
+    Color border_col = border ? *border : g_theme.border;
+
+    // Body
+    draw_rect(r, bg_col, layer);
+    draw_rect_outline(r, 1.5f, border_col, layer);
+
+    // Title bar if present
+    if (title && *title) {
+        f32 title_h = 26.0f;
+        Rect header_r = {r.x, r.y, r.w, title_h};
+        draw_rect(header_r, g_theme.bg_card, layer + 1);
+        draw_rect_outline(header_r, 1.0f, g_theme.border, layer + 1);
+        draw_text(title, r.x + 10.0f, r.y + 13.0f, 13.0f, 1.0f, g_theme.text_accent, layer + 2, false, 0.2f);
+    }
+#endif
+}
+
+void draw_text(const char* text, f32 x, f32 y, f32 px, f32 spacing,
+               const Color& col, i32 layer, bool centered, f32 glow) {
+#ifndef __EMSCRIPTEN__
+    s_native_backend.draw_text_screen(g_current_renderer, text, x, y, px, spacing, col, layer, centered, glow);
+#endif
+}
+
+f32 measure(const char* text, f32 px, f32 spacing) {
+#ifndef __EMSCRIPTEN__
+    return s_native_backend.measure(text, px, spacing);
+#else
+    return 0.0f;
+#endif
+}
+
+bool button(const char* label, const Rect& r, bool active, i32 layer) {
+    Vec2 mpos = Input::mouse_pos();
+    bool hovered = r.contains(mpos);
+    bool clicked = hovered && Input::was_mouse_pressed(MouseButton::Left);
+
+    Color bg = active ? g_theme.bg_active : (hovered ? g_theme.bg_hover : g_theme.bg_card);
+    Color border = active ? g_theme.border_active : (hovered ? g_theme.border_bright : g_theme.border);
+    Color text_col = active ? g_theme.text_primary : (hovered ? g_theme.text_primary : g_theme.text_secondary);
+
+    draw_rect(r, bg, layer);
+    draw_rect_outline(r, active || hovered ? 2.0f : 1.0f, border, layer);
+    if (hovered) {
+        draw_rect(r, Color{0.2f, 0.8f, 1.0f, 0.15f}, layer + 1, rhi::BlendMode::Additive);
+    }
+
+    Vec2 c = r.center();
+    draw_text(label, c.x, c.y, 14.0f, 1.0f, text_col, layer + 2, true, hovered ? 0.3f : 0.0f);
+    return clicked;
+}
+
+bool icon_button(const char* label, const char* icon_txt, const Rect& r, bool active, i32 layer) {
+    Vec2 mpos = Input::mouse_pos();
+    bool hovered = r.contains(mpos);
+    bool clicked = hovered && Input::was_mouse_pressed(MouseButton::Left);
+
+    Color bg = active ? g_theme.bg_active : (hovered ? g_theme.bg_hover : g_theme.bg_card);
+    Color border = active ? g_theme.border_active : (hovered ? g_theme.border_bright : g_theme.border);
+
+    draw_rect(r, bg, layer);
+    draw_rect_outline(r, 1.5f, border, layer);
+
+    if (icon_txt && *icon_txt) {
+        draw_text(icon_txt, r.x + 8.0f, r.y + r.h * 0.5f, 15.0f, 0.0f, g_theme.text_accent, layer + 2, false);
+    }
+    if (label && *label) {
+        f32 tx = (icon_txt && *icon_txt) ? r.x + 28.0f : r.x + 8.0f;
+        draw_text(label, tx, r.y + r.h * 0.5f, 13.0f, 0.5f, g_theme.text_primary, layer + 2, false);
+    }
+    return clicked;
+}
+
+bool toggle_button(const char* label, bool* value, const Rect& r, i32 layer) {
+    bool current = value ? *value : false;
+    if (button(label, r, current, layer)) {
+        if (value) *value = !*value;
+        return true;
+    }
+    return false;
+}
+
+void progress_bar(const Rect& r, f32 ratio, const Color& fill_col, const Color* bg_col, const char* label, i32 layer) {
+    Color bg = bg_col ? *bg_col : g_theme.bg_dark;
+    draw_rect(r, bg, layer);
+    draw_rect_outline(r, 1.0f, g_theme.border, layer);
+
+    f32 clamped = std::clamp(ratio, 0.0f, 1.0f);
+    if (clamped > 0.0f) {
+        Rect fill_r = {r.x + 1.0f, r.y + 1.0f, (r.w - 2.0f) * clamped, r.h - 2.0f};
+        draw_rect(fill_r, fill_col, layer + 1);
+        Color glow = fill_col;
+        glow.a = 0.35f;
+        draw_rect(fill_r, glow, layer + 1, rhi::BlendMode::Additive);
+    }
+
+    if (label && *label) {
+        Vec2 c = r.center();
+        draw_text(label, c.x, c.y, 11.0f, 0.5f, g_theme.text_primary, layer + 2, true);
+    }
+}
+
+void stat_card(const Rect& r, const char* title, const char* value, const char* subtitle, const Color* accent, i32 layer) {
+    Color acc = accent ? *accent : g_theme.accent_cyan;
+    draw_panel(r, nullptr, &g_theme.bg_card, &g_theme.border, layer);
+
+    // Left accent bar
+    draw_rect({r.x, r.y, 3.0f, r.h}, acc, layer + 1);
+
+    if (title) {
+        draw_text(title, r.x + 10.0f, r.y + 12.0f, 11.0f, 0.5f, g_theme.text_muted, layer + 2);
+    }
+    if (value) {
+        draw_text(value, r.x + 10.0f, r.y + 28.0f, 18.0f, 1.0f, g_theme.text_primary, layer + 2, false, 0.2f);
+    }
+    if (subtitle) {
+        draw_text(subtitle, r.x + 10.0f, r.y + r.h - 10.0f, 10.0f, 0.0f, acc, layer + 2);
+    }
+}
+
+void badge(const char* text, f32 x, f32 y, const Color& bg, const Color& fg, i32 layer) {
+    f32 w = measure(text, 11.0f, 0.0f) + 12.0f;
+    f32 h = 18.0f;
+    Rect r = {x, y - h * 0.5f, w, h};
+    draw_rect(r, bg, layer);
+    draw_rect_outline(r, 1.0f, fg, layer);
+    draw_text(text, r.center().x, r.center().y, 11.0f, 0.0f, fg, layer + 1, true);
+}
+
+void tooltip(const char* text, const Vec2& pos, i32 layer) {
+    if (!text || !*text) return;
+    f32 w = measure(text, 12.0f, 0.5f) + 16.0f;
+    f32 h = 24.0f;
+    Rect r = {pos.x + 12.0f, pos.y + 12.0f, w, h};
+    draw_rect(r, g_theme.bg_dark, layer);
+    draw_rect_outline(r, 1.0f, g_theme.border_bright, layer);
+    draw_text(text, r.center().x, r.center().y, 12.0f, 0.5f, g_theme.text_primary, layer + 1, true);
 }
 
 void flash(const char* text, f32 duration) {
-    if (g_backend) g_backend->flash(text, duration);
+    active_backend()->flash(text, duration);
+}
+
+void set_text(const char* element, const char* text) {
+    active_backend()->set_text(element, text);
+}
+
+void set_visible(const char* element, bool visible) {
+    active_backend()->set_visible(element, visible);
+}
+
+void set_fill(const char* element, f32 ratio) {
+    active_backend()->set_fill(element, ratio);
+}
+
+const char* get_text(const char* element, const char* default_val) {
+    return active_backend()->get_text(element, default_val);
+}
+
+bool visible(const char* element, bool default_val) {
+    return active_backend()->is_visible(element, default_val);
+}
+
+f32 fill(const char* element, f32 default_val) {
+    return active_backend()->get_fill(element, default_val);
 }
 
 void draw(Renderer2D* renderer) {
-    if (g_backend) g_backend->draw(renderer);
+    begin_frame(renderer);
+    active_backend()->draw(renderer);
+    end_frame();
 }
 
 }

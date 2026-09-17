@@ -40,4 +40,9 @@ void run_main_loop(void (*frame_callback)(void*), void* user_data) {
 #endif
 }
 
+f32 get_and_reset_mouse_wheel() {
+    return 0.0f;
 }
+
+}
+

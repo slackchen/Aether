@@ -39,16 +39,14 @@ bool D3D11Device::init(void* native_window_handle) {
     }
 
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+#ifdef _DEBUG
+    flags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
     D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0};
 
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                   flags | D3D11_CREATE_DEVICE_DEBUG,
+                                   flags,
                                    levels, 1, D3D11_SDK_VERSION, &device, nullptr, &context);
-    if (FAILED(hr)) {
-        printf("D3D11: hardware debug device failed (0x%08lx), retrying without debug\n", (unsigned long)hr);
-        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
-                               levels, 1, D3D11_SDK_VERSION, &device, nullptr, &context);
-    }
     if (FAILED(hr)) {
         printf("D3D11: hardware device creation failed (0x%08lx), trying WARP\n", (unsigned long)hr);
         hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
@@ -159,9 +157,12 @@ std::shared_ptr<rhi::RHIBuffer> D3D11Device::create_buffer(const rhi::BufferDesc
     buf->ctx = context;
     buf->buffer_size = desc.size;
     buf->dynamic = bd.Usage == D3D11_USAGE_DYNAMIC;
-    buf->cpu_data.assign((size_t)byte_width, 0);
-    if (initial_data) {
-        memcpy(buf->cpu_data.data(), initial_data, desc.size);
+    // 动态缓冲走 Map 路径, 不需要整块 CPU 镜像 (省内存)
+    if (!buf->dynamic || initial_data) {
+        buf->cpu_data.assign((size_t)byte_width, 0);
+        if (initial_data) {
+            memcpy(buf->cpu_data.data(), initial_data, desc.size);
+        }
     }
 
     if (bd.Usage == D3D11_USAGE_DYNAMIC && initial_data) {
@@ -311,7 +312,11 @@ std::shared_ptr<rhi::RHIRenderPipeline> D3D11Device::create_render_pipeline(cons
 
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
-    rd.CullMode = D3D11_CULL_NONE;
+    switch (desc.cull_mode) {
+        case rhi::CullMode::Front: rd.CullMode = D3D11_CULL_FRONT; break;
+        case rhi::CullMode::Back:  rd.CullMode = D3D11_CULL_BACK;  break;
+        default:                   rd.CullMode = D3D11_CULL_NONE;  break;
+    }
     rd.FrontCounterClockwise = desc.front_face == rhi::FrontFace::CCW ? TRUE : FALSE;
     rd.DepthClipEnable = FALSE;
     rd.ScissorEnable = FALSE;
@@ -350,6 +355,33 @@ std::shared_ptr<rhi::RHIRenderPipeline> D3D11Device::create_render_pipeline(cons
         return nullptr;
     }
 
+    // 深度状态: 未提供 depth_stencil 时显式禁用深度 (2D 精灵管线保持原行为)
+    D3D11_DEPTH_STENCIL_DESC dsd = {};
+    if (desc.depth_stencil) {
+        dsd.DepthEnable = TRUE;
+        dsd.DepthWriteMask = desc.depth_stencil->depth_write_enabled ? D3D11_DEPTH_WRITE_MASK_ALL
+                                                                     : D3D11_DEPTH_WRITE_MASK_ZERO;
+        switch (desc.depth_stencil->depth_compare) {
+            case rhi::CompareOp::Never:          dsd.DepthFunc = D3D11_COMPARISON_NEVER; break;
+            case rhi::CompareOp::Equal:          dsd.DepthFunc = D3D11_COMPARISON_EQUAL; break;
+            case rhi::CompareOp::LessOrEqual:    dsd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL; break;
+            case rhi::CompareOp::Greater:        dsd.DepthFunc = D3D11_COMPARISON_GREATER; break;
+            case rhi::CompareOp::NotEqual:       dsd.DepthFunc = D3D11_COMPARISON_NOT_EQUAL; break;
+            case rhi::CompareOp::GreaterOrEqual: dsd.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL; break;
+            case rhi::CompareOp::Always:         dsd.DepthFunc = D3D11_COMPARISON_ALWAYS; break;
+            default:                             dsd.DepthFunc = D3D11_COMPARISON_LESS; break;
+        }
+    } else {
+        dsd.DepthEnable = FALSE;
+        dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        dsd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    }
+    dsd.StencilEnable = FALSE;
+    if (FAILED(device->CreateDepthStencilState(&dsd, &pipeline->depth_stencil))) {
+        printf("D3D11: failed to create depth stencil state\n");
+        return nullptr;
+    }
+
     return pipeline;
 }
 
@@ -372,10 +404,14 @@ std::shared_ptr<rhi::RHIBindGroup> D3D11Device::create_bind_group(const rhi::Bin
 void D3D11Device::update_buffer(rhi::RHIBuffer* buffer, u64 offset, const void* data, u64 size) {
     auto* buf = static_cast<D3D11Buffer*>(buffer);
     if (!buf || !buf->buffer || !data || !size || !context) return;
+    if (offset + size > buf->buffer_size) return;
 
     if (buf->dynamic) {
+        // offset 0 的更新视为 "每帧新内容": DISCARD 让驱动重命名后台缓冲,
+        // CPU 不必等 GPU 读完上一帧数据 (NO_OVERWRITE 在 offset 0 反而会阻塞)。
+        D3D11_MAP map_type = offset == 0 ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE;
         D3D11_MAPPED_SUBRESOURCE mapped;
-        if (SUCCEEDED(context->Map(buf->buffer.Get(), 0, D3D11_MAP_WRITE_NO_OVERWRITE, 0, &mapped))) {
+        if (SUCCEEDED(context->Map(buf->buffer.Get(), 0, map_type, 0, &mapped))) {
             memcpy((u8*)mapped.pData + offset, data, size);
             context->Unmap(buf->buffer.Get(), 0);
         }
@@ -384,14 +420,29 @@ void D3D11Device::update_buffer(rhi::RHIBuffer* buffer, u64 offset, const void* 
 
     if (offset + size <= buf->cpu_data.size()) {
         memcpy(buf->cpu_data.data() + offset, data, size);
-        context->UpdateSubresource(buf->buffer.Get(), 0, nullptr, buf->cpu_data.data(), 0, 0);
-        static u32 s_n = 0;
-        if (s_n < 6) {
-            const u8* d = (const u8*)buf->cpu_data.data();
-            printf("UB: update %llu bytes, first=%u,%u,%u,%u,%u,%u,%u,%u dyn=%d\n",
-                   (unsigned long long)size, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], buf->dynamic);
-            fflush(stdout);
-            s_n++;
+    }
+
+    // 局部上传: staging + CopySubresourceRegion。
+    // UpdateSubresource 只能整块重传 (精灵 VB 曾是 64MB/帧×2), 且有驱动同步开销。
+    if (upload_staging_size < size) {
+        UINT cap = 1 << 20;                     // 起步 1MB, 按 2 的幂增长
+        while (cap < size) cap <<= 1;
+        D3D11_BUFFER_DESC sd = {};
+        sd.ByteWidth = cap;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (SUCCEEDED(device->CreateBuffer(&sd, nullptr, &upload_staging))) {
+            upload_staging_size = cap;
+        }
+    }
+    if (upload_staging) {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (SUCCEEDED(context->Map(upload_staging.Get(), 0, D3D11_MAP_WRITE, 0, &mapped))) {
+            memcpy(mapped.pData, data, size);
+            context->Unmap(upload_staging.Get(), 0);
+            D3D11_BOX box{0, 0, 0, (UINT)size, 1, 1};
+            context->CopySubresourceRegion(buf->buffer.Get(), 0, (UINT)offset, 0, 0,
+                                           upload_staging.Get(), 0, &box);
         }
     }
 }

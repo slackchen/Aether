@@ -15,6 +15,10 @@ if(NOT AETHER_PLATFORM_WEB)
     set(CMAKE_EXECUTABLE_SUFFIX ".exe")
 endif()
 
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 set(AETHER_ENGINE_SOURCES
     src/engine/renderer.cpp
     src/engine/renderer2d.cpp
@@ -94,6 +98,9 @@ function(aether_target name)
         set_target_properties(${name} PROPERTIES LINK_FLAGS "${AETHER_LINK_FLAGS}")
     else()
         target_compile_definitions(${name} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        if(MSVC)
+            target_compile_options(${name} PRIVATE /utf-8)
+        endif()
         target_link_libraries(${name} PRIVATE aether_engine)
     endif()
 endfunction()
@@ -105,8 +112,27 @@ aether_target(aether_demo
     src/demo/flight_shmup/game_ui.cpp
     src/demo/flight_shmup/art.cpp
 )
+aether_target(aether_dsp
+    src/demo/dyson_sphere/main.cpp
+    src/demo/dyson_sphere/game.cpp
+    src/demo/dyson_sphere/terrain.cpp
+    src/demo/dyson_sphere/world3d.cpp
+    src/demo/dyson_sphere/planet.cpp
+    src/demo/dyson_sphere/planet_grid.cpp
+    src/demo/dyson_sphere/mecha.cpp
+    src/demo/dyson_sphere/factory.cpp
+    src/demo/dyson_sphere/power.cpp
+    src/demo/dyson_sphere/dyson_sphere.cpp
+    src/demo/dyson_sphere/tech_tree.cpp
+    src/demo/dyson_sphere/blueprint.cpp
+    src/demo/dyson_sphere/universe.cpp
+    src/demo/dyson_sphere/dsp_ui.cpp
+    src/demo/dyson_sphere/dsp_audio.cpp
+    src/demo/dyson_sphere/dsp_art.cpp
+)
 
 if(AETHER_PLATFORM_WEB)
     file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/web)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/web/index.html ${CMAKE_BINARY_DIR}/index.html COPYONLY)
 endif()
+

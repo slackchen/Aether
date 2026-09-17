@@ -42,6 +42,8 @@ public:
     Starfield& starfield() { return starfield_; }
     rhi::RHIDevice* device() { return device_.get(); }
     rhi::RHICommandEncoder* encoder() { return encoder_.get(); }
+    rhi::Format color_format() const { return swapchain_ ? swapchain_->color_format() : rhi::Format::BGRA8Unorm; }
+    rhi::Format depth_format() const { return swapchain_ ? swapchain_->depth_format() : rhi::Format::Undefined; }
 
     void clear_color(f32 r, f32 g, f32 b, f32 a);
 

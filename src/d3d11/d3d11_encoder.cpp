@@ -8,6 +8,7 @@ D3D11CommandEncoder::D3D11CommandEncoder(ComPtr<ID3D11DeviceContext> context, f3
 
 void D3D11CommandEncoder::begin_render_pass(const rhi::RenderPassDesc& desc) {
     ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
     if (desc.color_attachment_count > 0 && desc.color_attachments) {
         auto* view = static_cast<D3D11TextureView*>(desc.color_attachments[0].view);
         rtv = view ? view->rtv.Get() : nullptr;
@@ -15,9 +16,16 @@ void D3D11CommandEncoder::begin_render_pass(const rhi::RenderPassDesc& desc) {
             if (desc.color_attachments[0].load_op == rhi::LoadOp::Clear) {
                 ctx->ClearRenderTargetView(rtv, desc.color_attachments[0].clear_color);
             }
-            ctx->OMSetRenderTargets(1, &rtv, nullptr);
         }
     }
+    if (desc.depth_attachment && desc.depth_attachment->view) {
+        auto* dview = static_cast<D3D11TextureView*>(desc.depth_attachment->view);
+        dsv = dview->dsv.Get();
+        if (dsv && desc.depth_attachment->load_op == rhi::LoadOp::Clear) {
+            ctx->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, desc.depth_attachment->clear_depth, 0);
+        }
+    }
+    ctx->OMSetRenderTargets(1, &rtv, dsv);
     D3D11_VIEWPORT vp = {};
     vp.Width = viewport_w;
     vp.Height = viewport_h;
@@ -51,6 +59,7 @@ void D3D11CommandEncoder::set_pipeline(rhi::RHIRenderPipeline* pipeline) {
     ctx->PSSetShader(p->ps.Get(), nullptr, 0);
     ctx->RSSetState(p->rasterizer.Get());
     ctx->OMSetBlendState(p->blend.Get(), nullptr, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(p->depth_stencil.Get(), 0);
     vertex_stride = p->vertex_stride;
 }
 

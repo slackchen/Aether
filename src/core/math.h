@@ -9,6 +9,13 @@ struct Vec3 {
     f32 x = 0.0f;
     f32 y = 0.0f;
     f32 z = 0.0f;
+
+    Vec3 operator+(const Vec3& o) const { return {x + o.x, y + o.y, z + o.z}; }
+    Vec3 operator-(const Vec3& o) const { return {x - o.x, y - o.y, z - o.z}; }
+    Vec3 operator*(f32 s) const { return {x * s, y * s, z * s}; }
+    Vec3& operator+=(const Vec3& o) { x += o.x; y += o.y; z += o.z; return *this; }
+    Vec3& operator-=(const Vec3& o) { x -= o.x; y -= o.y; z -= o.z; return *this; }
+    Vec3& operator*=(f32 s) { x *= s; y *= s; z *= s; return *this; }
 };
 
 struct Vec2 {
@@ -160,18 +167,32 @@ inline Mat4 mat4_look_at(const Vec3& eye, const Vec3& target, const Vec3& up) {
         zaxis.x /= zlen;
         zaxis.y /= zlen;
         zaxis.z /= zlen;
+    } else {
+        zaxis = {0.0f, 0.0f, 1.0f};
     }
 
+    Vec3 cur_up = up;
     Vec3 xaxis = {
-        up.y * zaxis.z - up.z * zaxis.y,
-        up.z * zaxis.x - up.x * zaxis.z,
-        up.x * zaxis.y - up.y * zaxis.x,
+        cur_up.y * zaxis.z - cur_up.z * zaxis.y,
+        cur_up.z * zaxis.x - cur_up.x * zaxis.z,
+        cur_up.x * zaxis.y - cur_up.y * zaxis.x,
     };
     f32 xlen = sqrtf(xaxis.x * xaxis.x + xaxis.y * xaxis.y + xaxis.z * xaxis.z);
+    if (xlen <= 1e-5f) {
+        cur_up = (fabsf(zaxis.y) < 0.9f) ? Vec3{0.0f, 1.0f, 0.0f} : Vec3{0.0f, 0.0f, 1.0f};
+        xaxis = {
+            cur_up.y * zaxis.z - cur_up.z * zaxis.y,
+            cur_up.z * zaxis.x - cur_up.x * zaxis.z,
+            cur_up.x * zaxis.y - cur_up.y * zaxis.x,
+        };
+        xlen = sqrtf(xaxis.x * xaxis.x + xaxis.y * xaxis.y + xaxis.z * xaxis.z);
+    }
     if (xlen > 1e-6f) {
         xaxis.x /= xlen;
         xaxis.y /= xlen;
         xaxis.z /= xlen;
+    } else {
+        xaxis = {1.0f, 0.0f, 0.0f};
     }
 
     Vec3 yaxis = {

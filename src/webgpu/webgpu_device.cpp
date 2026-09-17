@@ -433,6 +433,14 @@ std::shared_ptr<rhi::RHIRenderPipeline> WebGPUDevice::create_render_pipeline(con
         depth_stencil.format = convert_format(desc.depth_stencil->format);
         depth_stencil.depthWriteEnabled = desc.depth_stencil->depth_write_enabled ? WGPUOptionalBool_True : WGPUOptionalBool_False;
         depth_stencil.depthCompare = convert_compare_function(desc.depth_stencil->depth_compare);
+    } else {
+        // WebGPU 校验要求: 挂了深度附件的 render pass 中所有管线都必须声明
+        // depthStencilState。2D 精灵管线等效为 "不写深度 + 恒通过"。
+        depth_stencil.format = WGPUTextureFormat_Depth32Float;
+        depth_stencil.depthWriteEnabled = WGPUOptionalBool_False;
+        depth_stencil.depthCompare = WGPUCompareFunction_Always;
+    }
+    {
         depth_stencil.stencilFront.compare = WGPUCompareFunction_Always;
         depth_stencil.stencilBack.compare = WGPUCompareFunction_Always;
         depth_stencil.stencilFront.failOp = WGPUStencilOperation_Keep;

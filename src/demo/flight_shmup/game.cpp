@@ -180,6 +180,7 @@ void Game::start_game() {
     ui::show_screen("panel-win", false);
     ui::show_screen("panel-pause", false);
     Audio::unlock();
+    Audio::set_music_track(MusicTrack::FlightShmup);
     Audio::start_music(0);
 }
 
@@ -790,7 +791,7 @@ void Game::render() {
     trail_.render(batch);
     particles_.render(batch);
 
-    aether::engine::ui::draw(renderer_);
+    shmup::ui::draw(renderer_);
 
     batch.render(enc, cam.view_projection(renderer_->aspect()));
 

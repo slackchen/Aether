@@ -15,6 +15,7 @@ HWND g_hwnd = nullptr;
 HINSTANCE g_instance = nullptr;
 bool g_should_exit = false;
 void (*g_alt_enter_callback)() = nullptr;
+float g_mouse_wheel_delta = 0.0f;
 
 LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
@@ -24,6 +25,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
+        case WM_MOUSEWHEEL: {
+            short delta = GET_WHEEL_DELTA_WPARAM(wparam);
+            g_mouse_wheel_delta += (float)delta / (float)WHEEL_DELTA;
+            return 0;
+        }
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
             if (wparam == VK_RETURN && (GetAsyncKeyState(VK_MENU) & 0x8000)) {
@@ -39,6 +45,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
 }
 
 }  // namespace
+
+f32 get_and_reset_mouse_wheel() {
+    f32 val = g_mouse_wheel_delta;
+    g_mouse_wheel_delta = 0.0f;
+    return val;
+}
 
 void init_window(u32 width, u32 height, const char* title) {
     if (g_hwnd) return;

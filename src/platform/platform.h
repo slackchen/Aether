@@ -10,9 +10,11 @@ bool should_exit();
 void request_exit();
 double now_seconds();
 void run_main_loop(void (*frame_callback)(void*), void* user_data);
+f32 get_and_reset_mouse_wheel();
 
 #ifdef _WIN32
 void set_alt_enter_callback(void (*callback)());
 #endif
 
 }
+

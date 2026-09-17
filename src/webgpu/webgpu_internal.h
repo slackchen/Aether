@@ -93,6 +93,9 @@ struct WebGPUSwapchain : public rhi::RHISwapchain {
     WGPUSurface surface = nullptr;
     WGPUTexture current_texture = nullptr;
     WGPUTextureView current_view = nullptr;
+    WGPUDevice depth_device = nullptr;
+    WGPUTexture depth_texture = nullptr;
+    WGPUTextureView depth_view = nullptr;
     u32 w = 0;
     u32 h = 0;
     rhi::Format color_fmt = rhi::Format::BGRA8Unorm;
@@ -104,6 +107,7 @@ struct WebGPUSwapchain : public rhi::RHISwapchain {
     u32 width() const override { return w; }
     u32 height() const override { return h; }
     rhi::RHITextureView* get_current_view() override;
+    rhi::RHITextureView* get_depth_view() override;
     rhi::Format color_format() const override { return color_fmt; }
     rhi::Format depth_format() const override { return depth_fmt; }
     bool present() override;

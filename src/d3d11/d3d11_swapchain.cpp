@@ -71,12 +71,53 @@ rhi::RHITextureView* D3D11Swapchain::get_current_view() {
         w = cw;
         h = ch;
         configured = true;
+        ensure_depth_buffer();
         printf("D3D11: swapchain resized to %ux%u\n", w, h);
         fflush(stdout);
     }
 
     wrapper.srv.Reset();
     wrapper.rtv = rtv;
+    return &wrapper;
+}
+
+void D3D11Swapchain::ensure_depth_buffer() {
+    if (!device) return;
+    if (dsv && depth_buffer) {
+        D3D11_TEXTURE2D_DESC dd = {};
+        depth_buffer->GetDesc(&dd);
+        if (dd.Width == w && dd.Height == h) return;
+    }
+    depth_buffer.Reset();
+    dsv.Reset();
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_D32_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (FAILED(device->CreateTexture2D(&td, nullptr, &depth_buffer))) {
+        printf("D3D11: failed to create depth buffer\n");
+        return;
+    }
+    if (FAILED(device->CreateDepthStencilView(depth_buffer.Get(), nullptr, &dsv))) {
+        printf("D3D11: failed to create depth stencil view\n");
+        depth_buffer.Reset();
+        return;
+    }
+}
+
+rhi::RHITextureView* D3D11Swapchain::get_depth_view() {
+    ensure_depth_buffer();
+    if (!dsv) return nullptr;
+    static D3D11TextureView wrapper;
+    wrapper.srv.Reset();
+    wrapper.rtv.Reset();
+    wrapper.dsv = dsv;
     return &wrapper;
 }
 
@@ -120,6 +161,8 @@ void D3D11Swapchain::toggle_fullscreen() {
 
     backbuffer.Reset();
     rtv.Reset();
+    depth_buffer.Reset();
+    dsv.Reset();
     rtv_w = 0;
     rtv_h = 0;
     w = 0;
@@ -134,34 +177,6 @@ void D3D11Swapchain::toggle_fullscreen() {
 
 bool D3D11Swapchain::present() {
     if (!swapchain) return false;
-
-    static u64 s_frame = 0;
-    static ComPtr<ID3D11Texture2D> staging;
-    if (backbuffer && !staging) {
-        D3D11_TEXTURE2D_DESC td = {};
-        backbuffer->GetDesc(&td);
-        td.Usage = D3D11_USAGE_STAGING;
-        td.BindFlags = 0;
-        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        device->CreateTexture2D(&td, nullptr, &staging);
-    }
-    if (backbuffer && staging && s_frame % 30 == 0) {
-        ComPtr<ID3D11DeviceContext> ctx;
-        device->GetImmediateContext(&ctx);
-        ctx->CopyResource(staging.Get(), backbuffer.Get());
-        D3D11_MAPPED_SUBRESOURCE m = {};
-        if (SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) {
-            u8* p = (u8*)m.pData;
-            u8* c = p + (size_t)(h / 2) * m.RowPitch + (size_t)(w / 2) * 4;
-            u8* tl = p + (size_t)20 * m.RowPitch + (size_t)20 * 4;
-            u8* mr = p + (size_t)(h / 2) * m.RowPitch + (size_t)(w - 20) * 4;
-            printf("readback f%llu center=%u,%u,%u tl=%u,%u,%u midright=%u,%u,%u\n",
-                   (unsigned long long)s_frame, c[0], c[1], c[2], tl[0], tl[1], tl[2], mr[0], mr[1], mr[2]);
-            fflush(stdout);
-            ctx->Unmap(staging.Get(), 0);
-        }
-    }
-    s_frame++;
 
     HRESULT hr = swapchain->Present(1, 0);
     if (FAILED(hr)) {

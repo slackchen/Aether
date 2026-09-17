@@ -42,6 +42,7 @@ public:
     virtual u32 width() const = 0;
     virtual u32 height() const = 0;
     virtual RHITextureView* get_current_view() = 0;
+    virtual RHITextureView* get_depth_view() { return nullptr; }
     virtual Format color_format() const = 0;
     virtual Format depth_format() const = 0;
     virtual bool present() = 0;

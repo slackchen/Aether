@@ -2,6 +2,10 @@
 
 #include "core/platform.h"
 
+namespace aether::engine {
+class Renderer2D;
+}
+
 namespace shmup::ui {
 
 void set_score(aether::i32 value);
@@ -18,4 +22,7 @@ void hide_boss();
 
 void flash_message(const char* text, aether::f32 duration = 1.5f);
 
+void draw(aether::engine::Renderer2D* renderer);
+
 }
+
