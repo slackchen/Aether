@@ -1,6 +1,10 @@
 #include "webgpu/webgpu_internal.h"
 #include <cstdio>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 namespace aether::webgpu {
 
 WebGPUSwapchain::~WebGPUSwapchain() {
@@ -40,6 +44,16 @@ void WebGPUSwapchain::configure(WGPUDevice device) {
     wgpuSurfaceConfigure(surface, &config);
     configured = true;
     color_fmt = rhi::Format::BGRA8Unorm;
+#ifdef __EMSCRIPTEN__
+    {
+        double cw = 0.0, ch = 0.0;
+        emscripten_get_element_css_size("#canvas", &cw, &ch);
+        int bw = 0, bh = 0;
+        emscripten_get_canvas_element_size("#canvas", &bw, &bh);
+        printf("WebGPU swapchain configured %ux%u (canvas css %.0fx%.0f, backing %dx%d)\n",
+               w, h, cw, ch, bw, bh);
+    }
+#endif
 
     // 与表面同尺寸的深度附件
     if (depth_view) {
@@ -70,6 +84,9 @@ void WebGPUSwapchain::configure(WGPUDevice device) {
         view_desc.aspect = WGPUTextureAspect_DepthOnly;
         depth_view = wgpuTextureCreateView(depth_texture, &view_desc);
         depth_fmt = rhi::Format::Depth32Float;
+        printf("WebGPU depth texture created %ux%u (view %s)\n", w, h, depth_view ? "ok" : "FAILED");
+    } else {
+        printf("WebGPU depth texture creation FAILED\n");
     }
 }
 
@@ -108,6 +125,12 @@ rhi::RHITextureView* WebGPUSwapchain::get_current_view() {
     if (!current_view) {
         printf("Failed to create texture view\n");
         return nullptr;
+    }
+
+    static bool logged_once = false;
+    if (!logged_once) {
+        logged_once = true;
+        printf("WebGPU surface texture acquired OK (%ux%u, status %d)\n", w, h, (int)surf_tex.status);
     }
 
     static WebGPUTextureView wrapper;

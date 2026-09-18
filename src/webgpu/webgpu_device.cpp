@@ -139,7 +139,21 @@ void WebGPUDevice::on_adapter_requested(WGPURequestAdapterStatus status, WGPUAda
     dev->adapter_done = true;
     if (status != WGPURequestAdapterStatus_Success) {
         printf("WebGPU adapter request failed\n");
+    } else {
+        printf("WebGPU adapter acquired\n");
     }
+}
+
+static void on_device_lost(WGPUDevice const*, WGPUDeviceLostReason reason, WGPUStringView message,
+                           void*, void*) {
+    printf("WebGPU DEVICE LOST (reason %d): %.*s\n", (int)reason,
+           (int)message.length, message.data ? message.data : "");
+}
+
+static void on_uncaptured_error(WGPUDevice const*, WGPUErrorType type, WGPUStringView message,
+                                void*, void*) {
+    printf("WebGPU ERROR (type %d): %.*s\n", (int)type,
+           (int)message.length, message.data ? message.data : "");
 }
 
 void WebGPUDevice::on_device_requested(WGPURequestDeviceStatus status, WGPUDevice device,
@@ -150,7 +164,8 @@ void WebGPUDevice::on_device_requested(WGPURequestDeviceStatus status, WGPUDevic
     dev->pending_device = device;
     dev->device_done = true;
     if (status != WGPURequestDeviceStatus_Success) {
-        printf("WebGPU device request failed\n");
+        printf("WebGPU device request failed: %.*s\n", (int)message.length,
+               message.data ? message.data : "");
     }
 }
 
@@ -225,6 +240,9 @@ void WebGPUDevice::step_init() {
             dev_desc.requiredFeatures = nullptr;
             dev_desc.requiredLimits = nullptr;
             dev_desc.defaultQueue.label = make_string_view("AetherQueue");
+            dev_desc.deviceLostCallbackInfo.mode = WGPUCallbackMode_AllowProcessEvents;
+            dev_desc.deviceLostCallbackInfo.callback = &on_device_lost;
+            dev_desc.uncapturedErrorCallbackInfo.callback = &on_uncaptured_error;
             device_done = false;
             pending_device = nullptr;
             WGPURequestDeviceCallbackInfo cb_info = {};
@@ -301,17 +319,15 @@ std::shared_ptr<rhi::RHIBuffer> WebGPUDevice::create_buffer(const rhi::BufferDes
     buf->usage_flags = convert_buffer_usage(desc.usage);
     buf->usage_flags = (WGPUBufferUsage)((u32)buf->usage_flags | (u32)WGPUBufferUsage_CopyDst);
 
-    bool needs_mapping = (desc.memory_type == rhi::BufferMemoryType::HostVisible ||
-                          desc.memory_type == rhi::BufferMemoryType::HostCoherent);
-    if (needs_mapping) {
-        buf->usage_flags = (WGPUBufferUsage)((u32)buf->usage_flags | (u32)WGPUBufferUsage_MapWrite | (u32)WGPUBufferUsage_CopySrc);
-    }
+    // 注意: 不加 MapWrite。WebGPU 规定 MAP_WRITE 只能与 COPY_SRC 共存, 挂上
+    // VERTEX/UNIFORM 即校验失败 (缓冲整体无效 -> 黑屏)。engine 侧统一走
+    // Queue::WriteBuffer 上传 (只需 CopyDst), HostVisible/DeviceLocal 在本后端无区别。
 
     WGPUBufferDescriptor buf_desc = {};
     buf_desc.label = make_string_view("Buffer");
     buf_desc.usage = buf->usage_flags;
     buf_desc.size = desc.size;
-    buf_desc.mappedAtCreation = initial_data != nullptr;
+    buf_desc.mappedAtCreation = WGPU_FALSE;
 
     buf->buffer = wgpuDeviceCreateBuffer(device, &buf_desc);
     if (!buf->buffer) {
@@ -320,11 +336,7 @@ std::shared_ptr<rhi::RHIBuffer> WebGPUDevice::create_buffer(const rhi::BufferDes
     }
 
     if (initial_data) {
-        void* mapped = wgpuBufferGetMappedRange(buf->buffer, 0, desc.size);
-        if (mapped) {
-            memcpy(mapped, initial_data, desc.size);
-        }
-        wgpuBufferUnmap(buf->buffer);
+        wgpuQueueWriteBuffer(queue, buf->buffer, 0, initial_data, desc.size);
     }
 
     return std::static_pointer_cast<rhi::RHIBuffer>(buf);

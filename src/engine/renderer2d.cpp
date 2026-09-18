@@ -159,6 +159,13 @@ void Renderer2D::end_frame() {
     swapchain_->present();
     encoder_.reset();
     frame_started_ = false;
+
+#ifdef __EMSCRIPTEN__
+    static u32 frame_count = 0;
+    if (++frame_count % 300 == 1) {
+        printf("Renderer2D frame %u done (%ux%u)\n", frame_count, width_, height_);
+    }
+#endif
 }
 
 void Renderer2D::clear_color(f32 r, f32 g, f32 b, f32 a) {

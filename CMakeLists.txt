@@ -11,7 +11,10 @@ else()
     set(AETHER_PLATFORM_WEB FALSE)
 endif()
 
-if(NOT AETHER_PLATFORM_WEB)
+if(AETHER_PLATFORM_WEB)
+    # Emit a full HTML page (with --shell-file) instead of Emscripten's default bare .js
+    set(CMAKE_EXECUTABLE_SUFFIX ".html")
+else()
     set(CMAKE_EXECUTABLE_SUFFIX ".exe")
 endif()
 
@@ -77,12 +80,15 @@ endif()
 
 if(AETHER_PLATFORM_WEB)
     set(AETHER_LINK_FLAGS
-        "--use-port=emdawnwebgpu -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 -s NO_EXIT_RUNTIME=1 -s EXPORTED_RUNTIME_METHODS=['ccall','cwrap'] --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html"
+        "--use-port=emdawnwebgpu -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 -s NO_EXIT_RUNTIME=1 -s EXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
     )
+    set(AETHER_DEFAULT_SHELL web/shell.html)
 endif()
 
+# aether_target(name [SHELL path] sources...)
 function(aether_target name)
-    add_executable(${name} ${ARGN})
+    cmake_parse_arguments(AT "" "SHELL" "" ${ARGN})
+    add_executable(${name} ${AT_UNPARSED_ARGUMENTS})
     target_include_directories(${name} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
@@ -95,7 +101,12 @@ function(aether_target name)
             --use-port=emdawnwebgpu
         )
         target_link_libraries(${name} PRIVATE aether_engine)
-        set_target_properties(${name} PROPERTIES LINK_FLAGS "${AETHER_LINK_FLAGS}")
+        if(AT_SHELL)
+            set(shell_file ${CMAKE_CURRENT_SOURCE_DIR}/${AT_SHELL})
+        else()
+            set(shell_file ${CMAKE_CURRENT_SOURCE_DIR}/${AETHER_DEFAULT_SHELL})
+        endif()
+        set_target_properties(${name} PROPERTIES LINK_FLAGS "${AETHER_LINK_FLAGS} --shell-file ${shell_file}")
     else()
         target_compile_definitions(${name} PRIVATE _CRT_SECURE_NO_WARNINGS)
         if(MSVC)
@@ -113,6 +124,7 @@ aether_target(aether_demo
     src/demo/flight_shmup/art.cpp
 )
 aether_target(aether_dsp
+    SHELL web/shell_dsp.html
     src/demo/dyson_sphere/main.cpp
     src/demo/dyson_sphere/game.cpp
     src/demo/dyson_sphere/terrain.cpp

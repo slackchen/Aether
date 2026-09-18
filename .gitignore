@@ -2,7 +2,6 @@
 build/
 build-win/
 build-backup-*/
-web/
 
 # Emscripten SDK (third-party toolchain)
 emsdk/

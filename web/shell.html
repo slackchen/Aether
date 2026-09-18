@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Aether 3D Engine</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #fff; font-family: system-ui, sans-serif; font-size: 18px;
+        }
+        .hud {
+            position: fixed; left: 0; right: 0; top: 0;
+            padding: 12px 20px;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            color: #cfe8ff;
+            pointer-events: none;
+            user-select: none;
+            text-shadow: 0 0 8px rgba(0, 200, 255, 0.7), 0 0 24px rgba(0, 150, 255, 0.4);
+            z-index: 10;
+        }
+        .hud-row { display: flex; gap: 28px; align-items: baseline; }
+        .hud-label { font-size: 12px; letter-spacing: 2px; color: #7fb8e8; }
+        .hud-value { font-size: 26px; font-weight: 700; }
+        .hud-hidden { display: none; }
+        #hud-boss {
+            position: fixed; left: 50%; top: 0; transform: translateX(-50%);
+            width: min(560px, 70vw); z-index: 10; pointer-events: none;
+            font-family: 'Segoe UI', system-ui, sans-serif; color: #ffd0d0;
+            display: none;
+            text-align: center;
+        }
+        #boss-name { font-size: 14px; letter-spacing: 4px; text-shadow: 0 0 10px rgba(255,60,60,0.9); margin-bottom: 4px; }
+        #boss-bar {
+            height: 14px; border-radius: 8px;
+            background: rgba(40, 0, 0, 0.7);
+            border: 1px solid rgba(255, 80, 80, 0.7);
+            box-shadow: 0 0 12px rgba(255, 40, 40, 0.6);
+            overflow: hidden;
+        }
+        #boss-fill {
+            height: 100%; width: 100%;
+            background: linear-gradient(180deg, #ff7a6e, #e83020);
+            box-shadow: 0 0 14px rgba(255, 60, 40, 0.9);
+            transition: width 0.12s ease-out;
+        }
+        .panel {
+            position: fixed; inset: 0; display: none;
+            flex-direction: column; align-items: center; justify-content: center;
+            font-family: 'Segoe UI', system-ui, sans-serif; color: #e8f6ff;
+            text-align: center; z-index: 20;
+            background: radial-gradient(ellipse at center, rgba(0,10,30,0.55), rgba(0,0,0,0.82));
+            pointer-events: none; user-select: none;
+        }
+        .panel h1 {
+            font-size: 64px; letter-spacing: 10px; font-weight: 900;
+            color: #bfe6ff;
+            text-shadow: 0 0 18px rgba(0, 200, 255, 0.9), 0 0 60px rgba(0, 120, 255, 0.6), 0 2px 0 rgba(0,0,0,0.6);
+            margin-bottom: 18px;
+        }
+        .panel h2 { font-size: 46px; letter-spacing: 8px; font-weight: 900; margin-bottom: 18px;
+            color: #ffd9a0; text-shadow: 0 0 18px rgba(255, 150, 40, 0.8), 0 2px 0 rgba(0,0,0,0.6); }
+        .panel .sub { font-size: 18px; letter-spacing: 3px; color: #9fd4ff; margin-bottom: 8px;
+            text-shadow: 0 0 10px rgba(0,160,255,0.7); }
+        .panel .keys { font-size: 15px; letter-spacing: 1px; color: #6fa0c8; line-height: 1.9; }
+        .panel .btn {
+            font-size: 18px; letter-spacing: 3px; margin-top: 26px; padding: 10px 34px;
+            color: #0a1420; background: #bfe6ff; border-radius: 6px; font-weight: 800;
+            box-shadow: 0 0 22px rgba(0,200,255,0.8); animation: pulse 1.6s ease-in-out infinite;
+        }
+        .panel .score-line { font-size: 20px; letter-spacing: 2px; color: #e8f6ff; margin-top: 12px;
+            text-shadow: 0 0 12px rgba(0,200,255,0.6); }
+        @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+        #flash {
+            position: fixed; left: 0; right: 0; top: 38%;
+            text-align: center; z-index: 25; display: none;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            font-size: 42px; font-weight: 900; letter-spacing: 8px;
+            color: #fff; text-shadow: 0 0 24px rgba(255, 220, 120, 0.95), 0 0 80px rgba(255, 120, 40, 0.7);
+            pointer-events: none; user-select: none;
+            transition: opacity 0.5s ease-out;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="loading">Loading Aether Engine...</div>
+
+    <div class="hud" id="hud">
+        <div class="hud-row">
+            <div><div class="hud-label">SCORE</div><div class="hud-value" id="hud-score">0</div></div>
+            <div><div class="hud-label">HI-SCORE</div><div class="hud-value" id="hud-hiscore">0</div></div>
+            <div><div class="hud-label">LIVES</div><div class="hud-value" id="hud-lives">3</div></div>
+            <div><div class="hud-label">WEAPON</div><div class="hud-value" id="hud-weapon">1</div></div>
+        </div>
+    </div>
+
+    <div id="hud-boss">
+        <div id="boss-name">BOSS</div>
+        <div id="boss-bar"><div id="boss-fill"></div></div>
+    </div>
+
+    <div class="panel" id="panel-title" data-display="flex">
+        <h1>AETHER STRIKE</h1>
+        <div class="sub">VECTOR ASSAULT PROTOCOL</div>
+        <div class="keys">
+            MOVE: W A S D / ARROWS<br>
+            FIRE: J / SPACE &nbsp; SLOW: SHIFT &nbsp; PAUSE: P<br>
+            GAMEPAD: STICK / D-PAD MOVE &nbsp; RT FIRE &nbsp; LT SLOW &nbsp; START PAUSE
+        </div>
+        <div class="btn">PRESS ENTER TO START</div>
+    </div>
+
+    <div class="panel" id="panel-pause" data-display="flex">
+        <h2>PAUSED</h2>
+        <div class="sub">PRESS P TO RESUME</div>
+    </div>
+
+    <div class="panel" id="panel-gameover" data-display="flex">
+        <h2>GAME OVER</h2>
+        <div class="score-line" id="gameover-score">SCORE 0</div>
+        <div class="keys">PRESS ENTER TO RETRY</div>
+    </div>
+
+    <div class="panel" id="panel-win" data-display="flex">
+        <h2>MISSION COMPLETE</h2>
+        <div class="score-line" id="win-score">SCORE 0</div>
+        <div class="keys">PRESS ENTER TO PLAY AGAIN</div>
+    </div>
+
+    <div id="flash"></div>
+
+    <script type='text/javascript'>
+        var statusElement = document.getElementById('loading');
+        var Module = {
+            preRun: [],
+            postRun: [function() {
+                statusElement.style.display = 'none';
+            }],
+            canvas: (function() {
+                return document.getElementById('canvas');
+            })(),
+            print: (function() {
+                return function(text) {
+                    if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+                    console.log(text);
+                };
+            })(),
+            printErr: function(text) {
+                if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+                console.error(text);
+                if (text && typeof text === 'string' && !text.startsWith('[') && text.indexOf('warning') === -1) {
+                    statusElement.innerHTML = 'Error: ' + text;
+                    statusElement.style.color = '#f44';
+                }
+            },
+            setStatus: function(text) {
+                if (!Module.setStatus.last) Module.setStatus.last = { time: Date.now(), text: '' };
+                if (text === Module.setStatus.last.text) return;
+                if (text) {
+                    statusElement.innerHTML = text;
+                } else {
+                    statusElement.style.display = 'none';
+                }
+            },
+            monitorRunDependencies: function(left) {},
+            webgpu: {
+                enabled: true
+            }
+        };
+        window.onerror = function(event) {
+            console.error("On error:", event);
+            statusElement.innerHTML = 'Error: ' + event;
+            statusElement.style.color = '#f44';
+        };
+    </script>
+    {{{ SCRIPT }}}
+</body>
+</html>

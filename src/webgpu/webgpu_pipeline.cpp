@@ -113,6 +113,11 @@ void WebGPUCommandEncoder::submit() {
     if (!command_buffer) finish();
     if (command_buffer) {
         wgpuQueueSubmit(queue, 1, &command_buffer);
+        static bool logged_once = false;
+        if (!logged_once) {
+            logged_once = true;
+            printf("WebGPU first command buffer submitted\n");
+        }
     }
 }
 
