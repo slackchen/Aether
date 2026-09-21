@@ -28,3 +28,8 @@ cmake_install.cmake
 # Debug logs
 *.log
 .zcode/
+
+# Python bytecode
+__pycache__/
+# Font work-in-progress large TTFs (woff2 inputs are kept)
+Tools/_fontwork/*.ttf

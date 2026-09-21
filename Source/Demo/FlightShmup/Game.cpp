@@ -852,6 +852,7 @@ void Game::UpdateShake()
     if (mShakeTimer > 0.0f)
     {
         mShakeTimer -= mTimer->UnscaledDelta();
+        if (mShakeTimer < 0.0f) mShakeTimer = 0.0f;
         f32 m = mShakeMagnitude * (mShakeTimer / 0.35f);
         mCameraBase.x = gRandom.Range(-m, m);
         mCameraBase.y = gRandom.Range(-m, m);
