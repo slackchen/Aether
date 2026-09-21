@@ -3,8 +3,8 @@ build/
 build-win/
 build-backup-*/
 
-# Emscripten SDK (third-party toolchain)
-emsdk/
+# Third-party dependencies
+ThirdParty/emsdk/
 
 # CMake
 CMakeCache.txt
@@ -27,3 +27,4 @@ cmake_install.cmake
 *.wav
 # Debug logs
 *.log
+.zcode/
