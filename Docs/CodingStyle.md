@@ -31,6 +31,7 @@
 - include 一律相对**目标模块根**：本模块的写 `"Renderer.h"`；跨模块写相对对方模块根的路径，如 `"Container/Array.h"`、`"RHI.h"`、`"Platform.h"`，由构建系统注入对方模块的 Public 路径。
 - 禁止跨模块包含对方的 `Private/` 头（构建系统层面不可达）。
 - 平台相关代码保留平台原生风格：Win32/D3D11 处的 `HWND`、`WNDCLASSEX`、`HRESULT`、`ComPtr`；WebGPU/Emscripten 处的 `WGPU*`、`EM_JS`。自研标识符仍按本规范。
+- 层次依赖只能向下：`Core` ← `RHI` ← `Platform`/`Engine` ← `Demo`。并发模型见 `Docs/Architecture.md`。
 
 ## 4. 基础库（禁用 STL 容器）
 
