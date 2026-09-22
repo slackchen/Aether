@@ -84,28 +84,29 @@ void SystemScheduler::Build()
         }
 
         // Kahn layering: each wave holds all systems whose predecessors are
-        // done; those systems run concurrently.
+        // done; those systems run concurrently. Waves store GLOBAL system
+        // indices (successors/indegree are local to this phase).
         Array<Array<u32>>& waves = mWaves[phase];
         Array<bool> placed;
         placed.Resize(count, false);
         u32 placedCount = 0;
         while (placedCount < count)
         {
-            Array<u32> wave;
+            Array<u32> waveLocal;
             for (u32 i = 0; i < count; i++)
             {
                 if (!placed[i] && indegree[i] == 0)
                 {
-                    wave.Add(i);
+                    waveLocal.Add(i);
                 }
             }
-            if (wave.IsEmpty())
+            if (waveLocal.IsEmpty())
             {
                 printf("SystemScheduler: dependency cycle in phase %u\n", phase);
                 AETHER_ASSERT(false);
                 return;
             }
-            for (u32 i : wave)
+            for (u32 i : waveLocal)
             {
                 placed[i] = true;
                 placedCount++;
@@ -113,6 +114,11 @@ void SystemScheduler::Build()
                 {
                     indegree[next]--;
                 }
+            }
+            Array<u32> wave;
+            for (u32 i : waveLocal)
+            {
+                wave.Add(indices[i]);
             }
             waves.Add(std::move(wave));
         }

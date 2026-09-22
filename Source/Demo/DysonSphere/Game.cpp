@@ -1,10 +1,12 @@
 #include "Game.h"
 #include "Texture.h"
 #include "Input.h"
+#include "System.h"
 #include "UI.h"
 #include "DSPArt.h"
 #include "DSPAudio.h"
 #include "PlanetGrid.h"
+#include "Threading/JobSystem.h"
 #include <cmath>
 #include <cstdio>
 
@@ -13,6 +15,18 @@ namespace DSP
 
 using namespace Aether;
 using namespace Aether::Math;
+
+// 调度依赖标签: 声明各 System 的读写面, 调度器据此定序/并发
+namespace {
+struct TagGrid {};       // 星球网格瓦片 (建筑占位/矿量)
+struct TagUniverse {};   // 轨道/自转/相机
+struct TagMecha {};
+struct TagFactory {};
+struct TagPower {};      // 电力满足率 (工厂读上一帧值)
+struct TagTech {};
+struct TagDyson {};
+struct TagFx {};
+} // namespace
 
 static f32 Clamp01(f32 v) { return Math::Clamp(v, 0.0f, 1.0f); }
 static Color MulColor(Color c, f32 m) { return {c.r * m, c.g * m, c.b * m, c.a}; }
@@ -43,6 +57,7 @@ Game::Game(Engine::Renderer2D* renderer, Engine::Timer* timer)
         mGlowTex = Engine::MakeGlowTexture(mRenderer->Device(), 128);
         DSPArt::Init(mRenderer->Device());
         mWorld3D.Init(mRenderer->Device(), mRenderer->ColorFormat(), mRenderer->DepthFormat());
+        mSpaceBatch.Init(mRenderer->Device(), mRenderer->ColorFormat());
         EnsureTerrainMeshes(mUniverse.CurrentPlanet());
     }
     DSPAudioManager::Init();
@@ -372,16 +387,56 @@ bool Game::TryDismantle(u32 tileKey)
 }
 
 // ---------------------------------------------------------------------------
-// 更新
+// 更新 — 拆分为 System, 依赖由标签声明, 无冲突系统并发执行
 // ---------------------------------------------------------------------------
-void Game::Update()
+void Game::RegisterSystems(Engine::SystemScheduler& scheduler)
 {
-    f32 dt = mTimer->Delta();
-    if (dt <= 0.0f || dt > 0.1f) dt = 0.0166f;
-    mElapsedTime += dt;
+    auto reg = [&scheduler](const char* name, Engine::Phase phase,
+                            void (Game::*fn)(Engine::SystemContext&), Game* game,
+                            Array<u64> reads, Array<u64> writes) {
+        Engine::SystemDef def;
+        def.Name = name;
+        def.SysPhase = phase;
+        def.Update = [game, fn](Engine::SystemContext& ctx) { (game->*fn)(ctx); };
+        def.Reads = std::move(reads);
+        def.Writes = std::move(writes);
+        scheduler.Register(std::move(def));
+    };
 
-    Planet* planet = mUniverse.CurrentPlanet();
-    Star* star = mUniverse.CurrentStar();
+    // Simulation 波次: [PlayerInput] → [Universe] → [Mecha] → [Factory]
+    //                → [Power, Tech, Dyson](并发) → [CameraAmbience]
+    reg("PlayerInput", Engine::Phase::Simulation, &Game::SysPlayerInput, this,
+        {}, {Engine::TypeIdOf<TagGrid>(), Engine::TypeIdOf<TagUniverse>(),
+             Engine::TypeIdOf<TagMecha>(), Engine::TypeIdOf<TagFactory>()});
+    reg("Universe", Engine::Phase::Simulation, &Game::SysUniverse, this,
+        {}, {Engine::TypeIdOf<TagUniverse>()});
+    reg("Mecha", Engine::Phase::Simulation, &Game::SysMecha, this,
+        {Engine::TypeIdOf<TagUniverse>()}, {Engine::TypeIdOf<TagMecha>()});
+    reg("Factory", Engine::Phase::Simulation, &Game::SysFactory, this,
+        {Engine::TypeIdOf<TagGrid>(), Engine::TypeIdOf<TagUniverse>(),
+         Engine::TypeIdOf<TagPower>()}, {Engine::TypeIdOf<TagFactory>()});
+    reg("Power", Engine::Phase::Simulation, &Game::SysPower, this,
+        {Engine::TypeIdOf<TagFactory>(), Engine::TypeIdOf<TagMecha>()},
+        {Engine::TypeIdOf<TagPower>(), Engine::TypeIdOf<TagMecha>()});
+    reg("Tech", Engine::Phase::Simulation, &Game::SysTech, this,
+        {Engine::TypeIdOf<TagFactory>()}, {Engine::TypeIdOf<TagTech>()});
+    reg("Dyson", Engine::Phase::Simulation, &Game::SysDyson, this,
+        {Engine::TypeIdOf<TagFactory>()}, {Engine::TypeIdOf<TagDyson>()});
+    reg("CameraAmbience", Engine::Phase::Simulation, &Game::SysCameraAmbience, this,
+        {Engine::TypeIdOf<TagFactory>(), Engine::TypeIdOf<TagDyson>(),
+         Engine::TypeIdOf<TagMecha>(), Engine::TypeIdOf<TagUniverse>()},
+        {Engine::TypeIdOf<TagFx>(), Engine::TypeIdOf<TagUniverse>()});
+
+    reg("DspRenderPrep", Engine::Phase::RenderPrep, &Game::SysRenderPrep, this, {}, {});
+    reg("DspRenderSubmit", Engine::Phase::RenderSubmit, &Game::SysRenderSubmit, this, {}, {});
+}
+
+void Game::SysPlayerInput(Engine::SystemContext& ctx)
+{
+    f32 dt = ctx.Delta;
+    if (dt <= 0.0f || dt > 0.1f) dt = 0.0166f;
+    mSimDt = dt;
+    mElapsedTime += dt;
 
     HandleInput(dt);
 
@@ -391,19 +446,37 @@ void Game::Update()
                -baseX * sinf(sunA) + baseZ * cosf(sunA)};
     f32 slen = sqrtf(mSunPos.x * mSunPos.x + mSunPos.y * mSunPos.y + mSunPos.z * mSunPos.z);
     mSunDir = {mSunPos.x / slen, mSunPos.y / slen, mSunPos.z / slen};
+}
 
-    mUniverse.Update(dt);
-    mMecha.Update(dt, planet, mUniverse.Camera().CurrentScale() >= ViewScale::StarSystem);
+void Game::SysUniverse(Engine::SystemContext&)
+{
+    mUniverse.Update(mSimDt);
+}
 
+void Game::SysMecha(Engine::SystemContext&)
+{
+    mMecha.Update(mSimDt, mUniverse.CurrentPlanet(),
+                  mUniverse.Camera().CurrentScale() >= ViewScale::StarSystem);
+}
+
+void Game::SysFactory(Engine::SystemContext&)
+{
+    Planet* planet = mUniverse.CurrentPlanet();
+    f32 satisfaction = mPower.SatisfactionRatio();  // 上一帧值 (1 帧滞后握手)
+    mFactory.Update(mSimDt, planet, satisfaction);
+}
+
+void Game::SysPower(Engine::SystemContext&)
+{
     f32 mechaEnergy = mMecha.EnergyMJ();
-    f32 satisfaction = mPower.SatisfactionRatio();
-    mFactory.Update(dt, planet, satisfaction);
-
-    mPower.Update(dt, mFactory.Buildings(), mMecha.Position(), mechaEnergy,
+    mPower.Update(mSimDt, mFactory.Buildings(), mMecha.Position(), mechaEnergy,
                   mMecha.MaxEnergyMJ(), mSunDir, mElapsedTime);
     mMecha.SetEnergy(mechaEnergy);
+}
 
-    mTechTree.Update(dt, mFactory.Buildings());
+void Game::SysTech(Engine::SystemContext&)
+{
+    mTechTree.Update(mSimDt, mFactory.Buildings());
     TechId newlyUnlocked;
     if (mTechTree.HasNewUnlockEvent(newlyUnlocked))
     {
@@ -415,12 +488,20 @@ void Game::Update()
             Engine::UI::Flash(unlockBuf, 3.0f);
         }
     }
+}
 
+void Game::SysDyson(Engine::SystemContext&)
+{
+    Star* star = mUniverse.CurrentStar();
     if (star)
     {
-        star->DysonSphere.Update(dt, mFactory.LaunchedSolarSails(), mFactory.LaunchedCarrierRockets());
+        star->DysonSphere.Update(mSimDt, mFactory.LaunchedSolarSails(),
+                                 mFactory.LaunchedCarrierRockets());
     }
+}
 
+void Game::SysCameraAmbience(Engine::SystemContext&)
+{
     u32 sailsNow = mFactory.LaunchedSolarSails();
     u32 rocketsNow = mFactory.LaunchedCarrierRockets();
     if (sailsNow > mPrevSails)
@@ -448,12 +529,12 @@ void Game::Update()
     mPrevSails = sailsNow;
     mPrevRockets = rocketsNow;
 
-    UpdateLaunchFx(dt);
+    UpdateLaunchFx(mSimDt);
 
     Vec3 planetPos = {0.0f, 0.0f, 0.0f};
-    mUniverse.Camera().Update(dt, mMecha.Position(), planetPos, mSunPos, mMecha.Altitude());
+    mUniverse.Camera().Update(mSimDt, mMecha.Position(), planetPos, mSunPos, mMecha.Altitude());
 
-    DSPAudioManager::Update(dt, mUniverse.Camera(), (f32)mFactory.Buildings().Count());
+    DSPAudioManager::Update(mSimDt, mUniverse.Camera(), (f32)mFactory.Buildings().Count());
 }
 
 void Game::UpdateLaunchFx(f32 dt)
@@ -535,25 +616,29 @@ static void Line3D(Engine::SpriteBatch& batch, const Game& game,
 }
 
 // ---------------------------------------------------------------------------
-// 渲染主流程
+// 渲染主流程 (拆分为两个 System)
+//   RenderPrep  (并行): Pass A 组装 + 戴森网格重建 + 矿脉/工厂遍历, 精灵
+//               进各线程 bin; 纯 CPU, 不触 GPU
+//   RenderSubmit(主线程): Pass A 冲刷 → 3D pass → UI + Pass B 冲刷
+//
 //   Pass A (2D): 深空背景 + 恒星
 //   3D pass:   地形 / 水面 / 大气 / 戴森球 (真实深度缓冲, 硬件遮挡)
 //   Pass B (2D): 天空穹顶 + 工厂/机甲/矿脉/UI
 // ---------------------------------------------------------------------------
-void Game::Render()
+void Game::SysRenderPrep(Engine::SystemContext&)
 {
-    if (!mRenderer || !mRenderer->BeginFrame()) return;
+    if (!mRenderer) return;
 
-    auto* enc = mRenderer->Encoder();
     auto& batch = mRenderer->Sprites();
     batch.Clear();
+    mSpaceBatch.Clear();
 
-    f32 aspect = mRenderer->Aspect();
-    Mat4 vp3d = mUniverse.Camera().ViewProjection(aspect);
+    mRcAspect = mRenderer->Aspect();
+    mRcVp3d = mUniverse.Camera().ViewProjection(mRcAspect);
 
     mRenderer->GetCamera().Position = {0.0f, 0.0f};
     mRenderer->GetCamera().Zoom = 1.0f;
-    Mat4 vp2d = mRenderer->GetCamera().ViewProjection(aspect);
+    mRcVp2d = mRenderer->GetCamera().ViewProjection(mRcAspect);
 
     Planet* planet = mUniverse.CurrentPlanet();
     Star* star = mUniverse.CurrentStar();
@@ -574,45 +659,85 @@ void Game::Render()
     }
 
     // --- Pass A: 深空背景 + 恒星 (随后被 3D 地形正确遮挡) ---
-    RenderSpace(batch, vp3d, aspect);
-    if (!mFlatView) RenderSun(batch, vp3d, aspect);
-    batch.Render(enc, vp2d);
-    batch.Clear();
+    RenderSpace(mSpaceBatch, mRcVp3d, mRcAspect);
+    if (!mFlatView) RenderSun(mSpaceBatch, mRcVp3d, mRcAspect);
+
+    // --- 戴森球动态网格: 并行重建 (提交阶段上传) ---
+    if (star && !mFlatView) BuildDysonMesh();
+
+    // --- Pass B 重活并行进 bin ---
+    if (planet)
+    {
+        RenderVeins(batch, mRcVp3d, mRcAspect, planet);
+        RenderFactory(batch, mRcVp3d, mRcAspect, planet);
+    }
+
+    // --- Pass B 轻量串行段 ---
+    if (!mFlatView) RenderSkyDome(batch, planet);
+    if (planet)
+    {
+        RenderCursorGhost(batch, mRcVp3d, mRcAspect, planet);
+        RenderMecha(batch, mRcVp3d, mRcAspect, planet);
+    }
+    RenderLaunchFx(batch, mRcVp3d, mRcAspect);
+    RenderLensFlare(batch, mRcAspect);
+}
+
+void Game::SysRenderSubmit(Engine::SystemContext& ctx)
+{
+    if (!mRenderer) return;
+
+    auto* enc = mRenderer->Encoder();
+    auto& batch = mRenderer->Sprites();
+
+    // --- Pass A: 深空背景 + 恒星 ---
+    mSpaceBatch.Render(enc, mRcVp2d);
+    mSpaceBatch.Clear();
 
     // --- 3D pass: 地形/水面/大气/戴森球 ---
+    Planet* planet = mUniverse.CurrentPlanet();
+    Star* star = mUniverse.CurrentStar();
     if (mWorld3D.IsReady())
     {
         if (planet) EnsureTerrainMeshes(planet);
-        mWorld3D.SetGlobals(vp3d, mUniverse.Camera().Eye(), mSunDir, mElapsedTime);
+        mWorld3D.SetGlobals(mRcVp3d, mUniverse.Camera().Eye(), mSunDir, mElapsedTime);
         mWorld3D.DrawTerrain(enc);
         mWorld3D.DrawWater(enc);
         if (!mFlatView)
         {
-            if (star) RenderDysonSphere3D(vp3d, aspect);
+            if (star)
+            {
+                mWorld3D.UploadLines(mDysonLines.Data(), (u32)mDysonLines.Count());
+                mWorld3D.UploadTris(mDysonTris.Data(), (u32)mDysonTris.Count());
+                mWorld3D.DrawLines(enc);
+                mWorld3D.DrawTris(enc);
+            }
             mWorld3D.DrawAtmosphere(enc);
         }
     }
 
-    // --- Pass B: 游戏层精灵 ---
-    if (!mFlatView) RenderSkyDome(batch, planet);
-    if (planet)
-    {
-        RenderVeins(batch, vp3d, aspect, planet);
-        RenderFactory(batch, vp3d, aspect, planet);
-        RenderCursorGhost(batch, vp3d, aspect, planet);
-        RenderMecha(batch, vp3d, aspect, planet);
-    }
-    RenderLaunchFx(batch, vp3d, aspect);
-    RenderLensFlare(batch, aspect);
-
-    // UI
+    // --- UI + Pass B 冲刷 ---
     static DysonSphereManager sFallbackDyson;
     DysonSphereManager& dyson = star ? star->DysonSphere : sFallbackDyson;
     mUI.UpdateAndRender(mRenderer, mMecha, planet, mFactory, mPower, dyson,
                         mTechTree, mBlueprints, mUniverse, mSunDir, mElapsedTime);
 
-    batch.Render(enc, vp2d);
-    mRenderer->EndFrame();
+    batch.Render(enc, mRcVp2d);
+
+    // 帧耗时统计 (约每 2 秒打印一次平均值/峰值, 便于性能观察)
+    static f32 sAcc = 0.0f, sPeak = 0.0f;
+    static u32 sFrames = 0;
+    f32 ft = ctx.Delta;
+    sAcc += ft;
+    if (ft > sPeak) sPeak = ft;
+    if (++sFrames >= 120)
+    {
+        printf("[perf] avg %.2f ms  max %.2f ms  (sprites=%u)\n",
+               sAcc * 1000.0f / sFrames, sPeak, batch.SpriteCount());
+        sAcc = 0.0f;
+        sPeak = 0.0f;
+        sFrames = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -780,24 +905,19 @@ static void PushBillboard(Array<World3D::Vertex>& out, const Vec3& p,
     out.Add({p3, dummy, col});
 }
 
-void Game::RenderDysonSphere3D(const Mat4& vp, f32 aspect)
+// ---------------------------------------------------------------------------
+// 4) 戴森球网格重建 (RenderPrep 阶段, 并行; 提交阶段上传绘制)
+//    帆板/骨架/节点串行 (量小), 太阳帆蜂群 ParallelFor 分片写各线程
+//    part 后按 bin 序合并, 保持确定性。
+// ---------------------------------------------------------------------------
+void Game::BuildDysonMesh()
 {
-    (void)vp;
-    (void)aspect;
     Star* star = mUniverse.CurrentStar();
     if (!star || !mWorld3D.IsReady()) return;
     const DysonSphereManager& dyson = star->DysonSphere;
 
-    static Array<World3D::Vertex> lines, tris;
-    static bool sReserved = false;
-    if (!sReserved)
-    {
-        lines.Reserve(8192);
-        tris.Reserve(131072);
-        sReserved = true;
-    }
-    lines.Clear();
-    tris.Clear();
+    mDysonLines.Clear();
+    mDysonTris.Clear();
 
     // 帆板: 完成度越高越亮
     for (const DysonShellPanel& p : dyson.Panels())
@@ -816,7 +936,7 @@ void Game::RenderDysonSphere3D(const Mat4& vp, f32 aspect)
         PushSphereTri(panel, a, b, c, col, 1);
         for (const World3D::Vertex& v : panel)
         {
-            tris.Add({{v.Position.x + mSunPos.x, v.Position.y + mSunPos.y, v.Position.z + mSunPos.z},
+            mDysonTris.Add({{v.Position.x + mSunPos.x, v.Position.y + mSunPos.y, v.Position.z + mSunPos.z},
                       v.Normal, v.Color});
         }
     }
@@ -828,9 +948,9 @@ void Game::RenderDysonSphere3D(const Mat4& vp, f32 aspect)
         const DysonNode& na = dyson.Nodes()[st.NodeA];
         const DysonNode& nb = dyson.Nodes()[st.NodeB];
         Color col = st.Completed ? Color{0.25f, 0.85f, 1.0f, 0.65f} : Color{0.45f, 0.55f, 0.65f, 0.30f};
-        lines.Add({{mSunPos.x + na.Pos.x, mSunPos.y + na.Pos.y, mSunPos.z + na.Pos.z},
+        mDysonLines.Add({{mSunPos.x + na.Pos.x, mSunPos.y + na.Pos.y, mSunPos.z + na.Pos.z},
                    {0.0f, 1.0f, 0.0f}, col});
-        lines.Add({{mSunPos.x + nb.Pos.x, mSunPos.y + nb.Pos.y, mSunPos.z + nb.Pos.z},
+        mDysonLines.Add({{mSunPos.x + nb.Pos.x, mSunPos.y + nb.Pos.y, mSunPos.z + nb.Pos.z},
                    {0.0f, 1.0f, 0.0f}, col});
     }
 
@@ -840,20 +960,40 @@ void Game::RenderDysonSphere3D(const Mat4& vp, f32 aspect)
     {
         Vec3 p = {mSunPos.x + n.Pos.x, mSunPos.y + n.Pos.y, mSunPos.z + n.Pos.z};
         Color nc = n.Completed ? Color{0.3f, 0.95f, 1.0f, 0.9f} : Color{0.55f, 0.62f, 0.72f, 0.5f};
-        PushBillboard(tris, p, cam.Right(), cam.Up(), 16.0f, nc);
+        PushBillboard(mDysonTris, p, cam.Right(), cam.Up(), 16.0f, nc);
     }
 
-    // 太阳帆蜂群
-    for (const SolarSailParticle& s : dyson.Sails())
+    // 太阳帆蜂群 (并行分片)
+    const Array<SolarSailParticle>& sails = dyson.Sails();
+    if (sails.Count() > 0)
     {
-        Vec3 p = {mSunPos.x + s.Pos.x, mSunPos.y + s.Pos.y, mSunPos.z + s.Pos.z};
-        PushBillboard(tris, p, cam.Right(), cam.Up(), 9.0f, Color{1.0f, 0.85f, 0.45f, 0.85f});
+        const u32 partCount = Math::Min((u32)Aether::Engine::SpriteBatch::MAX_BINS,
+                                        Aether::Platform::Jobs::Parallelism());
+        for (u32 b = 0; b < partCount; b++)
+        {
+            mDysonSailParts[b].Clear();
+        }
+        const Vec3 camRight = cam.Right();
+        const Vec3 camUp = cam.Up();
+        Aether::Platform::Jobs::ParallelFor(0, (u64)sails.Count(), 512,
+            [this, &sails, camRight, camUp, partCount](u64 begin, u64 end, u32 threadIndex) {
+                const u32 part = Math::Min(threadIndex, partCount - 1);
+                Array<World3D::Vertex>& out = mDysonSailParts[part];
+                for (u64 i = begin; i < end; i++)
+                {
+                    const SolarSailParticle& s = sails[(u32)i];
+                    Vec3 p = {mSunPos.x + s.Pos.x, mSunPos.y + s.Pos.y, mSunPos.z + s.Pos.z};
+                    PushBillboard(out, p, camRight, camUp, 9.0f, Color{1.0f, 0.85f, 0.45f, 0.85f});
+                }
+            });
+        for (u32 b = 0; b < partCount; b++)
+        {
+            for (const World3D::Vertex& v : mDysonSailParts[b])
+            {
+                mDysonTris.Add(v);
+            }
+        }
     }
-
-    mWorld3D.UploadLines(lines.Data(), (u32)lines.Count());
-    mWorld3D.UploadTris(tris.Data(), (u32)tris.Count());
-    mWorld3D.DrawLines(mRenderer->Encoder());
-    mWorld3D.DrawTris(mRenderer->Encoder());
 }
 
 // ---------------------------------------------------------------------------
@@ -875,41 +1015,44 @@ void Game::RenderVeins(Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect, c
     u32 stride = camDist > 900.0f ? 3 : 1; // 远景抽稀
 
     constexpr u32 VN = PlanetGrid::TILES_PER_FACE;
-    for (u32 face = 0; face < PlanetGrid::FACE_COUNT; face++)
-    {
-        for (u32 u = 0; u < VN; u++)
+    // 13,824 瓦片全遍历: 按扁平索引 ParallelFor, 精灵直接进各线程 bin
+    const u32 totalTiles = PlanetGrid::FACE_COUNT * VN * VN;
+    Aether::Platform::Jobs::ParallelFor(0, (u64)totalTiles, 1024,
+        [&](u64 begin, u64 end, u32) {
+        for (u64 flat = begin; flat < end; flat++)
         {
-            for (u32 v = 0; v < VN; v++)
+            const u32 face = (u32)(flat / (VN * VN));
+            const u32 rem = (u32)(flat % (VN * VN));
+            const u32 u = rem / VN;
+            const u32 v = rem % VN;
+            u32 key = PlanetGrid::Key((u8)face, (u8)u, (u8)v);
+            const Tile& t = grid.GetTile(key);
+            if (t.Resource == 0) continue;
+            if (stride > 1 && ((key * 2654435761u) % stride) != 0) continue;
+            Vec3 n = PlanetGrid::TileNormal(key);
+            if (n.x * eyeDir.x + n.y * eyeDir.y + n.z * eyeDir.z < horizonCos - 0.005f) continue;
+
+            Vec3 pos = grid.TileCenter(R, key) + n * 1.2f;
+            auto pr = Project(pos, vp, aspect);
+            if (!pr.Ok) continue;
+            f32 worldSz = 9.0f + (f32)t.Richness * 2.5f;
+            f32 px = Math::Clamp(WorldToPx(*this, worldSz, pr.Depth, fov), 3.0f, 64.0f);
+
+            Vec2 uv0, uv1;
+            DSPArt::CellUv(8, 1, (int)t.Resource - 1, uv0, uv1);
+            f32 rot = (f32)(t.Tint % 8) * Math::PI * 0.25f;
+            f32 deplete = t.ResourceAmount > 0 ? Clamp01((f32)t.ResourceAmount / 600000.0f) : 0.0f;
+            f32 sz = px * (0.55f + 0.45f * deplete);
+            Color light = MulColor(Color{1, 1, 1, 1}, 0.45f + 0.6f * Math::Max(0.0f, n.x * mSunDir.x + n.y * mSunDir.y + n.z * mSunDir.z));
+            light.a = 1.0f;
+            batch.AddUv(veinTex, uv0, uv1, pr.Pos, {sz, sz}, light, rot, -60.0f);
+            if (mGlowTex)
             {
-                u32 key = PlanetGrid::Key((u8)face, (u8)u, (u8)v);
-                const Tile& t = grid.GetTile(key);
-                if (t.Resource == 0) continue;
-                if (stride > 1 && ((key * 2654435761u) % stride) != 0) continue;
-                Vec3 n = PlanetGrid::TileNormal(key);
-                if (n.x * eyeDir.x + n.y * eyeDir.y + n.z * eyeDir.z < horizonCos - 0.005f) continue;
-
-                Vec3 pos = grid.TileCenter(R, key) + n * 1.2f;
-                auto pr = Project(pos, vp, aspect);
-                if (!pr.Ok) continue;
-                f32 worldSz = 9.0f + (f32)t.Richness * 2.5f;
-                f32 px = Math::Clamp(WorldToPx(*this, worldSz, pr.Depth, fov), 3.0f, 64.0f);
-
-                Vec2 uv0, uv1;
-                DSPArt::CellUv(8, 1, (int)t.Resource - 1, uv0, uv1);
-                f32 rot = (f32)(t.Tint % 8) * Math::PI * 0.25f;
-                f32 deplete = t.ResourceAmount > 0 ? Clamp01((f32)t.ResourceAmount / 600000.0f) : 0.0f;
-                f32 sz = px * (0.55f + 0.45f * deplete);
-                Color light = MulColor(Color{1, 1, 1, 1}, 0.45f + 0.6f * Math::Max(0.0f, n.x * mSunDir.x + n.y * mSunDir.y + n.z * mSunDir.z));
-                light.a = 1.0f;
-                batch.AddUv(veinTex, uv0, uv1, pr.Pos, {sz, sz}, light, rot, -60.0f);
-                if (mGlowTex)
-                {
-                    Color gc = PlanetGridVeinGlow(t.Resource);
-                    batch.Add(mGlowTex, pr.Pos, {sz * 1.6f, sz * 1.6f}, Color{gc.r, gc.g, gc.b, 0.30f * deplete}, 0.0f, -59.0f, RHI::BlendMode::Additive);
-                }
+                Color gc = PlanetGridVeinGlow(t.Resource);
+                batch.Add(mGlowTex, pr.Pos, {sz * 1.6f, sz * 1.6f}, Color{gc.r, gc.g, gc.b, 0.30f * deplete}, 0.0f, -59.0f, RHI::BlendMode::Additive);
             }
         }
-    }
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,133 +1189,40 @@ void Game::RenderFactory(Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect,
 
     const Array<Building>& list = mFactory.Buildings();
 
-    // 电力弧线
-    for (u32 i = 0; i < (u32)list.Count(); i++)
-    {
-        if (list[i].Kind != BuildingKind::TeslaTower && list[i].Kind != BuildingKind::WirelessPowerTower) continue;
-        for (u32 j = i + 1; j < (u32)list.Count(); j++)
+    // 电力弧线 (O(n²) 电塔对): 按建筑索引分片并行, 每对只由 i 侧绘制
+    Aether::Platform::Jobs::ParallelFor(0, (u64)list.Count(), 8,
+        [&](u64 begin, u64 end, u32) {
+        for (u64 ii = begin; ii < end; ii++)
         {
-            if (list[j].Kind != BuildingKind::TeslaTower && list[j].Kind != BuildingKind::WirelessPowerTower) continue;
-            Vec3 d = {list[j].WorldPos.x - list[i].WorldPos.x, list[j].WorldPos.y - list[i].WorldPos.y, list[j].WorldPos.z - list[i].WorldPos.z};
-            f32 dl = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
-            if (dl > 55.0f) continue;
-            Vec3 a = list[i].WorldPos + PlanetGrid::TileNormal(list[i].TileKey) * 6.0f;
-            Vec3 b = list[j].WorldPos + PlanetGrid::TileNormal(list[j].TileKey) * 6.0f;
-            Line3D(batch, *this, mSolidTex, a, b, vp, aspect, 1.5f, Color{0.25f, 0.9f, 1.0f, 0.5f}, -11.0f, RHI::BlendMode::Additive);
-            // 能量脉冲
-            f32 t = fmodf(mElapsedTime * 0.7f + (f32)i * 0.13f, 1.0f);
-            Vec3 pulse = {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t};
-            auto pp = Project(pulse, vp, aspect);
-            if (pp.Ok) batch.Add(mGlowTex, pp.Pos, {5.0f, 5.0f}, Color{0.5f, 1.0f, 1.0f, 0.8f}, 0.0f, -10.0f, RHI::BlendMode::Additive);
-        }
-    }
-
-    // 建筑
-    for (const Building& b : list)
-    {
-        Vec3 n = PlanetGrid::TileNormal(b.TileKey);
-        if (n.x * eyeDir.x + n.y * eyeDir.y + n.z * eyeDir.z < horizonCos - 0.02f) continue;
-        auto pr = Project(b.WorldPos + n * 1.5f, vp, aspect);
-        if (!pr.Ok) continue;
-
-        f32 worldSz = BuildingWorldSize(b.Kind);
-        f32 sz = worldSz * pscale / pr.Depth;
-        if (sz < 1.5f) continue;
-        sz = Math::Min(sz, 260.0f);
-
-        // 地面阴影
-        auto spr = Project(b.WorldPos + n * 0.2f, vp, aspect);
-        if (spr.Ok)
-        {
-            batch.Add(mGlowTex, spr.Pos, {sz * 0.8f, sz * 0.8f}, Color{0.0f, 0.0f, 0.0f, 0.30f}, 0.0f, -40.0f);
-        }
-
-        // 朝向角
-        Vec3 nb = grid.TileCenter(R, PlanetGrid::NeighborKey(b.TileKey, b.Dir));
-        Vec3 facing = {nb.x - b.WorldPos.x, nb.y - b.WorldPos.y, nb.z - b.WorldPos.z};
-        f32 fl = sqrtf(facing.x * facing.x + facing.y * facing.y + facing.z * facing.z);
-        if (fl > 1e-4f) { facing.x /= fl; facing.y /= fl; facing.z /= fl; }
-        f32 ang = ScreenAngleOf(*this, b.WorldPos, facing, vp, aspect);
-
-        int idx = (int)b.Kind - 1;
-        Vec2 uv0, uv1;
-        DSPArt::CellUv(6, 6, idx, uv0, uv1);
-        Color light = MulColor(Color{1, 1, 1, 1}, 0.55f + 0.5f * Math::Max(0.0f, n.x * mSunDir.x + n.y * mSunDir.y + n.z * mSunDir.z));
-        light.a = 1.0f;
-        batch.AddUv(btex, uv0, uv1, pr.Pos, {sz, sz}, light, ang, -25.0f);
-
-        // 工作状态灯
-        bool isMachine = b.Kind == BuildingKind::ArcSmelter || b.Kind == BuildingKind::AssemblingMachine ||
-                         b.Kind == BuildingKind::ChemicalPlant || b.Kind == BuildingKind::MatrixLab ||
-                         b.Kind == BuildingKind::MiningMachine;
-        if (mGlowTex && isMachine)
-        {
-            bool working = b.Progress > 0.0f && b.Progress < 1.0f;
-            Color lamp = working ? Color{0.25f, 1.0f, 0.5f, 0.6f + 0.3f * sinf(b.AnimTimer * 6.0f)} :
-                         b.Powered ? Color{0.2f, 0.7f, 1.0f, 0.4f} : Color{1.0f, 0.25f, 0.2f, 0.6f};
-            batch.Add(mGlowTex, pr.Pos, {sz * 0.5f, sz * 0.5f}, lamp, 0.0f, -24.0f, RHI::BlendMode::Additive);
-        }
-        // 熔炉火光
-        if (mGlowTex && b.Kind == BuildingKind::ArcSmelter && b.Progress > 0.0f)
-        {
-            f32 fl2 = 0.5f + 0.5f * sinf(b.AnimTimer * 9.0f);
-            batch.Add(mGlowTex, pr.Pos, {sz * 0.55f, sz * 0.55f}, Color{1.0f, 0.45f, 0.12f, 0.4f + 0.3f * fl2}, 0.0f, -23.0f, RHI::BlendMode::Additive);
-        }
-
-        // 传送带 + 货物
-        if (b.Kind == BuildingKind::ConveyorBelt && items)
-        {
-            for (const BeltItem& it : b.BeltItems)
+            const u32 i = (u32)ii;
+            if (list[i].Kind != BuildingKind::TeslaTower && list[i].Kind != BuildingKind::WirelessPowerTower) continue;
+            for (u32 j = i + 1; j < (u32)list.Count(); j++)
             {
-                if (it.Kind == ItemKind::None) continue;
-                f32 off = (it.Progress - 0.5f) * (R * PlanetGrid::STEP * 1.35f);
-                Vec3 ip = b.WorldPos + facing * off + n * 0.9f;
-                auto ipr = Project(ip, vp, aspect);
-                if (!ipr.Ok) continue;
-                Vec2 iuv0, iuv1;
-                DSPArt::CellUv(8, 8, (int)it.Kind, iuv0, iuv1);
-                f32 isz = Math::Clamp(4.2f * pscale / pr.Depth, 2.0f, 30.0f);
-                batch.AddUv(items, iuv0, iuv1, ipr.Pos, {isz, isz}, Color{1, 1, 1, 1}, 0.0f, -15.0f);
+                if (list[j].Kind != BuildingKind::TeslaTower && list[j].Kind != BuildingKind::WirelessPowerTower) continue;
+                Vec3 d = {list[j].WorldPos.x - list[i].WorldPos.x, list[j].WorldPos.y - list[i].WorldPos.y, list[j].WorldPos.z - list[i].WorldPos.z};
+                f32 dl = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+                if (dl > 55.0f) continue;
+                Vec3 a = list[i].WorldPos + PlanetGrid::TileNormal(list[i].TileKey) * 6.0f;
+                Vec3 b = list[j].WorldPos + PlanetGrid::TileNormal(list[j].TileKey) * 6.0f;
+                Line3D(batch, *this, mSolidTex, a, b, vp, aspect, 1.5f, Color{0.25f, 0.9f, 1.0f, 0.5f}, -11.0f, RHI::BlendMode::Additive);
+                // 能量脉冲
+                f32 t = fmodf(mElapsedTime * 0.7f + (f32)i * 0.13f, 1.0f);
+                Vec3 pulse = {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t};
+                auto pp = Project(pulse, vp, aspect);
+                if (pp.Ok) batch.Add(mGlowTex, pp.Pos, {5.0f, 5.0f}, Color{0.5f, 1.0f, 1.0f, 0.8f}, 0.0f, -10.0f, RHI::BlendMode::Additive);
             }
         }
+        });
 
-        // 分拣器臂
-        if (b.Kind == BuildingKind::Sorter)
+    // 建筑 (含传送带货物/分拣器/进度条): 逐建筑独立, 分片并行进 bin
+    Aether::Platform::Jobs::ParallelFor(0, (u64)list.Count(), 8,
+        [&](u64 begin, u64 end, u32) {
+        for (u64 bi = begin; bi < end; bi++)
         {
-            Building* src = mFactory.BuildingAtTile(b.SrcKey);
-            Building* dst = mFactory.BuildingAtTile(b.DstKey);
-            if (src && dst)
-            {
-                f32 t = b.SorterArmProgress;
-                Vec3 arm = {src->WorldPos.x + (dst->WorldPos.x - src->WorldPos.x) * t,
-                            src->WorldPos.y + (dst->WorldPos.y - src->WorldPos.y) * t,
-                            src->WorldPos.z + (dst->WorldPos.z - src->WorldPos.z) * t};
-                Line3D(batch, *this, mSolidTex, b.WorldPos + n * 1.5f, arm + n * 1.5f, vp, aspect, 2.0f,
-                       Color{0.9f, 0.8f, 0.4f, 0.85f}, -14.0f);
-                if (b.SorterHeldItem.Kind != ItemKind::None && items)
-                {
-                    auto apr = Project(arm + n * 2.0f, vp, aspect);
-                    if (apr.Ok)
-                    {
-                        Vec2 iuv0, iuv1;
-                        DSPArt::CellUv(8, 8, (int)b.SorterHeldItem.Kind, iuv0, iuv1);
-                        f32 isz = Math::Clamp(4.0f * pscale / apr.Depth, 2.0f, 26.0f);
-                        batch.AddUv(items, iuv0, iuv1, apr.Pos, {isz, isz}, Color{1, 1, 1, 1}, 0.0f, -14.0f);
-                    }
-                }
-            }
+            const Building& b = list[(u32)bi];
+            ProcessBuildingSprite(batch, b, vp, aspect, planet, pscale, eyeDir, horizonCos, showBars, btex, items);
         }
-
-        // 进度条
-        if (showBars && isMachine && b.Progress > 0.01f)
-        {
-            f32 barW = Math::Clamp(sz * 0.75f, 14.0f, 60.0f);
-            Vec2 barPos = {pr.Pos.x - barW * 0.5f, pr.Pos.y - sz * 0.62f};
-            batch.Add(mSolidTex, {barPos.x + barW * 0.5f, barPos.y + 2.0f}, {barW + 2.0f, 5.0f}, Color{0.05f, 0.07f, 0.10f, 0.8f}, 0.0f, -12.0f);
-            batch.Add(mSolidTex, {barPos.x + barW * 0.5f * b.Progress, barPos.y + 2.0f}, {barW * b.Progress, 3.0f},
-                      Color{0.25f, 0.95f, 1.0f, 0.95f}, 0.0f, -12.0f);
-        }
-    }
+        });
 
     // 物流飞船
     for (const LogisticsShip& s : mFactory.ActiveShips())
@@ -1185,6 +1235,120 @@ void Game::RenderFactory(Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect,
             batch.AddUv(fx, {0.75f, 0.0f}, {1.0f, 0.5f}, pr.Pos, {px, px * 0.6f}, Color{1, 1, 1, 1}, 0.0f, -3.0f);
         }
         batch.Add(mGlowTex, pr.Pos, {px * 1.8f, px * 1.8f}, Color{0.25f, 0.8f, 1.0f, 0.5f}, 0.0f, -4.0f, RHI::BlendMode::Additive);
+    }
+}
+
+// 单建筑精灵化 (RenderFactory 并行分片的循环体, 只读建筑状态)
+void Game::ProcessBuildingSprite(Engine::SpriteBatch& batch, const Building& b,
+                                 const Mat4& vp, f32 aspect, const Planet* planet,
+                                 f32 pscale, const Vec3& eyeDir, f32 horizonCos, bool showBars,
+                                 const RefPtr<RHI::RHITexture>& btex,
+                                 const RefPtr<RHI::RHITexture>& items)
+{
+    const PlanetGrid& grid = planet->Grid();
+    f32 R = planet->Radius();
+
+    Vec3 n = PlanetGrid::TileNormal(b.TileKey);
+    if (n.x * eyeDir.x + n.y * eyeDir.y + n.z * eyeDir.z < horizonCos - 0.02f) return;
+    auto pr = Project(b.WorldPos + n * 1.5f, vp, aspect);
+    if (!pr.Ok) return;
+
+    f32 worldSz = BuildingWorldSize(b.Kind);
+    f32 sz = worldSz * pscale / pr.Depth;
+    if (sz < 1.5f) return;
+    sz = Math::Min(sz, 260.0f);
+
+    // 地面阴影
+    auto spr = Project(b.WorldPos + n * 0.2f, vp, aspect);
+    if (spr.Ok)
+    {
+        batch.Add(mGlowTex, spr.Pos, {sz * 0.8f, sz * 0.8f}, Color{0.0f, 0.0f, 0.0f, 0.30f}, 0.0f, -40.0f);
+    }
+
+    // 朝向角
+    Vec3 nb = grid.TileCenter(R, PlanetGrid::NeighborKey(b.TileKey, b.Dir));
+    Vec3 facing = {nb.x - b.WorldPos.x, nb.y - b.WorldPos.y, nb.z - b.WorldPos.z};
+    f32 fl = sqrtf(facing.x * facing.x + facing.y * facing.y + facing.z * facing.z);
+    if (fl > 1e-4f) { facing.x /= fl; facing.y /= fl; facing.z /= fl; }
+    f32 ang = ScreenAngleOf(*this, b.WorldPos, facing, vp, aspect);
+
+    int idx = (int)b.Kind - 1;
+    Vec2 uv0, uv1;
+    DSPArt::CellUv(6, 6, idx, uv0, uv1);
+    Color light = MulColor(Color{1, 1, 1, 1}, 0.55f + 0.5f * Math::Max(0.0f, n.x * mSunDir.x + n.y * mSunDir.y + n.z * mSunDir.z));
+    light.a = 1.0f;
+    batch.AddUv(btex, uv0, uv1, pr.Pos, {sz, sz}, light, ang, -25.0f);
+
+    // 工作状态灯
+    bool isMachine = b.Kind == BuildingKind::ArcSmelter || b.Kind == BuildingKind::AssemblingMachine ||
+                     b.Kind == BuildingKind::ChemicalPlant || b.Kind == BuildingKind::MatrixLab ||
+                     b.Kind == BuildingKind::MiningMachine;
+    if (mGlowTex && isMachine)
+    {
+        bool working = b.Progress > 0.0f && b.Progress < 1.0f;
+        Color lamp = working ? Color{0.25f, 1.0f, 0.5f, 0.6f + 0.3f * sinf(b.AnimTimer * 6.0f)} :
+                     b.Powered ? Color{0.2f, 0.7f, 1.0f, 0.4f} : Color{1.0f, 0.25f, 0.2f, 0.6f};
+        batch.Add(mGlowTex, pr.Pos, {sz * 0.5f, sz * 0.5f}, lamp, 0.0f, -24.0f, RHI::BlendMode::Additive);
+    }
+    // 熔炉火光
+    if (mGlowTex && b.Kind == BuildingKind::ArcSmelter && b.Progress > 0.0f)
+    {
+        f32 fl2 = 0.5f + 0.5f * sinf(b.AnimTimer * 9.0f);
+        batch.Add(mGlowTex, pr.Pos, {sz * 0.55f, sz * 0.55f}, Color{1.0f, 0.45f, 0.12f, 0.4f + 0.3f * fl2}, 0.0f, -23.0f, RHI::BlendMode::Additive);
+    }
+
+    // 传送带 + 货物
+    if (b.Kind == BuildingKind::ConveyorBelt && items)
+    {
+        for (const BeltItem& it : b.BeltItems)
+        {
+            if (it.Kind == ItemKind::None) continue;
+            f32 off = (it.Progress - 0.5f) * (R * PlanetGrid::STEP * 1.35f);
+            Vec3 ip = b.WorldPos + facing * off + n * 0.9f;
+            auto ipr = Project(ip, vp, aspect);
+            if (!ipr.Ok) continue;
+            Vec2 iuv0, iuv1;
+            DSPArt::CellUv(8, 8, (int)it.Kind, iuv0, iuv1);
+            f32 isz = Math::Clamp(4.2f * pscale / pr.Depth, 2.0f, 30.0f);
+            batch.AddUv(items, iuv0, iuv1, ipr.Pos, {isz, isz}, Color{1, 1, 1, 1}, 0.0f, -15.0f);
+        }
+    }
+
+    // 分拣器臂
+    if (b.Kind == BuildingKind::Sorter)
+    {
+        Building* src = mFactory.BuildingAtTile(b.SrcKey);
+        Building* dst = mFactory.BuildingAtTile(b.DstKey);
+        if (src && dst)
+        {
+            f32 t = b.SorterArmProgress;
+            Vec3 arm = {src->WorldPos.x + (dst->WorldPos.x - src->WorldPos.x) * t,
+                        src->WorldPos.y + (dst->WorldPos.y - src->WorldPos.y) * t,
+                        src->WorldPos.z + (dst->WorldPos.z - src->WorldPos.z) * t};
+            Line3D(batch, *this, mSolidTex, b.WorldPos + n * 1.5f, arm + n * 1.5f, vp, aspect, 2.0f,
+                   Color{0.9f, 0.8f, 0.4f, 0.85f}, -14.0f);
+            if (b.SorterHeldItem.Kind != ItemKind::None && items)
+            {
+                auto apr = Project(arm + n * 2.0f, vp, aspect);
+                if (apr.Ok)
+                {
+                    Vec2 iuv0, iuv1;
+                    DSPArt::CellUv(8, 8, (int)b.SorterHeldItem.Kind, iuv0, iuv1);
+                    f32 isz = Math::Clamp(4.0f * pscale / apr.Depth, 2.0f, 26.0f);
+                    batch.AddUv(items, iuv0, iuv1, apr.Pos, {isz, isz}, Color{1, 1, 1, 1}, 0.0f, -14.0f);
+                }
+            }
+        }
+    }
+
+    // 进度条
+    if (showBars && isMachine && b.Progress > 0.01f)
+    {
+        f32 barW = Math::Clamp(sz * 0.75f, 14.0f, 60.0f);
+        Vec2 barPos = {pr.Pos.x - barW * 0.5f, pr.Pos.y - sz * 0.62f};
+        batch.Add(mSolidTex, {barPos.x + barW * 0.5f, barPos.y + 2.0f}, {barW + 2.0f, 5.0f}, Color{0.05f, 0.07f, 0.10f, 0.8f}, 0.0f, -12.0f);
+        batch.Add(mSolidTex, {barPos.x + barW * 0.5f * b.Progress, barPos.y + 2.0f}, {barW * b.Progress, 3.0f},
+                  Color{0.25f, 0.95f, 1.0f, 0.95f}, 0.0f, -12.0f);
     }
 }
 

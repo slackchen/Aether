@@ -14,6 +14,7 @@
 #include "Container/Array.h"
 #include "Container/RefPtr.h"
 #include "RHI.h"
+#include "System.h"
 
 namespace DSP {
 
@@ -27,13 +28,15 @@ using Aether::Math::Vec3;
 using Aether::Array;
 using Aether::RefPtr;
 
+namespace Engine = Aether::Engine;
+
 class Game {
 public:
     Game(Aether::Engine::Renderer2D* renderer, Aether::Engine::Timer* timer);
     ~Game();
 
-    void Update();
-    void Render();
+    // 把拆分后的 System 注册进调度器 (在渲染器就绪后调用)。
+    void RegisterSystems(Aether::Engine::SystemScheduler& scheduler);
 
     // 3D 世界坐标 → 2D 屏幕坐标 (中心原点, y 向下); 供静态绘制辅助使用
     struct Proj {
@@ -44,6 +47,20 @@ public:
     Proj Project(const Vec3& worldP, const Mat4& vp, f32 aspect) const;
 
 private:
+    // --- Simulation 系统 (依赖由 Reads/Writes 标签声明给调度器) ---
+    void SysPlayerInput(Aether::Engine::SystemContext& ctx);
+    void SysUniverse(Aether::Engine::SystemContext& ctx);
+    void SysMecha(Aether::Engine::SystemContext& ctx);
+    void SysFactory(Aether::Engine::SystemContext& ctx);
+    void SysPower(Aether::Engine::SystemContext& ctx);
+    void SysTech(Aether::Engine::SystemContext& ctx);
+    void SysDyson(Aether::Engine::SystemContext& ctx);
+    void SysCameraAmbience(Aether::Engine::SystemContext& ctx);
+
+    // --- 渲染: RenderPrep 并行构建 (CPU), RenderSubmit 主线程提交 ---
+    void SysRenderPrep(Aether::Engine::SystemContext& ctx);
+    void SysRenderSubmit(Aether::Engine::SystemContext& ctx);
+
     // --- 输入与建造 ---
     void HandleInput(f32 dt);
     void UpdateCursor(const Vec3& rayO, const Vec3& rayD);
@@ -58,12 +75,17 @@ private:
     void RenderSpace(Aether::Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect);
     void RenderSkyDome(Aether::Engine::SpriteBatch& batch, const Planet* planet);
     void RenderSun(Aether::Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect);
-    void RenderDysonSphere3D(const Mat4& vp, f32 aspect);
+    void BuildDysonMesh();            // 并行重建戴森球顶点 (RenderPrep 阶段)
     void EnsureTerrainMeshes(Planet* planet);
     void RebuildFlatViewMesh();
     void RenderVeins(Aether::Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect, const Planet* planet);
     void RenderCursorGhost(Aether::Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect, const Planet* planet);
     void RenderFactory(Aether::Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect, const Planet* planet);
+    void ProcessBuildingSprite(Aether::Engine::SpriteBatch& batch, const Building& b,
+                               const Mat4& vp, f32 aspect, const Planet* planet,
+                               f32 pscale, const Vec3& eyeDir, f32 horizonCos, bool showBars,
+                               const RefPtr<Aether::RHI::RHITexture>& btex,
+                               const RefPtr<Aether::RHI::RHITexture>& items);
     void RenderMecha(Aether::Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect, const Planet* planet);
     void RenderLaunchFx(Aether::Engine::SpriteBatch& batch, const Mat4& vp, f32 aspect);
     void RenderLensFlare(Aether::Engine::SpriteBatch& batch, f32 aspect);
@@ -84,6 +106,21 @@ private:
     TechTreeManager mTechTree;
     BlueprintManager mBlueprints;
     DSPUI mUI;
+
+    // 深空背景独立批次: Pass A 与 Pass B 分开冲刷, Pass B 才能吃满多线程 bin
+    Aether::Engine::SpriteBatch mSpaceBatch;
+
+    // 戴森球动态网格: RenderPrep 并行重建, RenderSubmit 上传
+    Array<World3D::Vertex> mDysonLines;
+    Array<World3D::Vertex> mDysonTris;
+    Array<World3D::Vertex> mDysonSailParts[Aether::Engine::SpriteBatch::MAX_BINS];
+
+    // 帧渲染缓存 (prep 填充, submit 读取)
+    f32 mRcAspect = 1.0f;
+    Mat4 mRcVp3d;
+    Mat4 mRcVp2d;
+
+    f32 mSimDt = 0.0f;                // PlayerInput 系统钳制后的本帧 dt
 
     // 光标
     u32 mCursorTile = 0;
