@@ -6,6 +6,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
+#include <dxgi1_3.h>
 #include <wrl/client.h>
 #endif
 

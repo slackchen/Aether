@@ -140,17 +140,38 @@ bool SpriteBatch::Init(RHI::RHIDevice* device, RHI::Format colorFormat)
     return true;
 }
 
+Array<Sprite>& SpriteBatch::CurrentBin()
+{
+    u32 index = Platform::Jobs::ThreadIndex();
+    AETHER_ASSERT(index < MAX_BINS);
+    return mBins[index];
+}
+
 void SpriteBatch::Clear()
 {
-    mSprites.Clear();
+    for (u32 b = 0; b < MAX_BINS; b++)
+    {
+        mBins[b].Clear();
+    }
+}
+
+u32 SpriteBatch::SpriteCount() const
+{
+    u32 total = 0;
+    for (u32 b = 0; b < MAX_BINS; b++)
+    {
+        total += mBins[b].Count();
+    }
+    return total;
 }
 
 void SpriteBatch::Add(RefPtr<RHI::RHITexture> texture, const Math::Vec2& position, const Math::Vec2& size,
                       const Math::Color& color, f32 rotation, f32 layer, RHI::BlendMode blend)
 {
     if (!texture) return;
-    if (mSprites.Count() >= MAX_SPRITES) return;
-    Sprite& sprite = mSprites.EmplaceAdd();
+    Array<Sprite>& bin = CurrentBin();
+    if (bin.Count() >= MAX_SPRITES) return;
+    Sprite& sprite = bin.EmplaceAdd();
     sprite.Texture = std::move(texture);
     sprite.Position = position;
     sprite.Size = size;
@@ -165,8 +186,9 @@ void SpriteBatch::AddUv(RefPtr<RHI::RHITexture> texture, const Math::Vec2& uv0, 
                         f32 rotation, f32 layer, RHI::BlendMode blend)
 {
     if (!texture) return;
-    if (mSprites.Count() >= MAX_SPRITES) return;
-    Sprite& sprite = mSprites.EmplaceAdd();
+    Array<Sprite>& bin = CurrentBin();
+    if (bin.Count() >= MAX_SPRITES) return;
+    Sprite& sprite = bin.EmplaceAdd();
     sprite.Texture = std::move(texture);
     sprite.Uv0 = uv0;
     sprite.Uv1 = uv1;
@@ -184,8 +206,10 @@ void SpriteBatch::AddQuad(RefPtr<RHI::RHITexture> texture,
                           const Math::Vec2& uv0, const Math::Vec2& uv1,
                           RHI::BlendMode blend)
 {
-    if (!texture || mSprites.Count() >= MAX_SPRITES) return;
-    Sprite& sprite = mSprites.EmplaceAdd();
+    if (!texture) return;
+    Array<Sprite>& bin = CurrentBin();
+    if (bin.Count() >= MAX_SPRITES) return;
+    Sprite& sprite = bin.EmplaceAdd();
     sprite.Texture = std::move(texture);
     sprite.Color = color;
     sprite.Layer = layer;
@@ -246,45 +270,57 @@ void SpriteBatch::BuildQuad(const Sprite& sprite, f32* verts)
 
 void SpriteBatch::Render(RHI::RHICommandEncoder* encoder, const Math::Mat4& vp)
 {
-    if (!mDevice || mSprites.IsEmpty()) return;
+    if (!mDevice) return;
+
+    // Merge all bins in ascending bin order (deterministic across frames).
+    u32 total = 0;
+    mMergeScratch.Clear();
+    for (u32 b = 0; b < MAX_BINS && total < MAX_SPRITES; b++)
+    {
+        u32 count = mBins[b].Count();
+        for (u32 i = 0; i < count && total < MAX_SPRITES; i++)
+        {
+            mMergeScratch.Add({b, i});
+            total++;
+        }
+    }
+    if (total == 0) return;
 
     mDevice->UpdateBuffer(mUniformBuffer.Get(), 0, vp.m, sizeof(vp.m));
 
-    const u32 total = Math::Min(mSprites.Count(), MAX_SPRITES);
+    // 按层排序 (bin, index) 全序引用, 任意排序算法都稳定;
+    // 引用轻量, 避免 Sort 时搬运 Sprite 与引用计数抖动。
+    mMergeScratch.Sort([this](const SpriteRef& a, const SpriteRef& b) {
+        const Sprite& sa = mBins[a.Bin][a.Index];
+        const Sprite& sb = mBins[b.Bin][b.Index];
+        if (sa.Layer != sb.Layer) return sa.Layer < sb.Layer;
+        if (a.Bin != b.Bin) return a.Bin < b.Bin;
+        return a.Index < b.Index;
+    });
 
-    // 按层排序索引 (不整块拷贝 Sprite, 避免每帧引用计数抖动)。
-    // 插入排序保持稳定: 同层 Sprite 保持插入顺序。
-    mSortScratch.Resize(total);
-    for (u32 i = 0; i < total; i++) mSortScratch[i] = i;
-    for (u32 i = 1; i < total; i++)
-    {
-        u32 key = mSortScratch[i];
-        u32 j = i;
-        while (j > 0 && mSprites[mSortScratch[j - 1]].Layer > mSprites[key].Layer)
-        {
-            mSortScratch[j] = mSortScratch[j - 1];
-            j--;
-        }
-        mSortScratch[j] = key;
-    }
-
+    // 并行构建顶点: 每个 sprite 写各自的 32 个 float, 互不重叠。
     const u32 floatsPerSprite = VERTICES_PER_SPRITE * FLOATS_PER_VERTEX;
     mVertexScratch.Resize(total * floatsPerSprite);
-    for (u32 i = 0; i < total; i++)
-    {
-        BuildQuad(mSprites[mSortScratch[i]], &mVertexScratch[i * floatsPerSprite]);
-    }
+    f32* vertexData = mVertexScratch.Data();
+    Platform::Jobs::ParallelFor(0, (u64)total, 256, [this, vertexData, floatsPerSprite](u64 begin, u64 end, u32) {
+        for (u64 i = begin; i < end; i++)
+        {
+            const SpriteRef& ref = mMergeScratch[(u32)i];
+            BuildQuad(mBins[ref.Bin][ref.Index], vertexData + i * floatsPerSprite);
+        }
+    });
     mDevice->UpdateBuffer(mVertexBuffer.Get(), 0, mVertexScratch.Data(),
                           (u64)total * floatsPerSprite * sizeof(f32));
 
     u32 start = 0;
     while (start < total)
     {
-        const Sprite& first = mSprites[mSortScratch[start]];
+        const Sprite& first = mBins[mMergeScratch[start].Bin][mMergeScratch[start].Index];
         u32 end = start + 1;
         while (end < total)
         {
-            const Sprite& next = mSprites[mSortScratch[end]];
+            const SpriteRef& nextRef = mMergeScratch[end];
+            const Sprite& next = mBins[nextRef.Bin][nextRef.Index];
             if (next.Texture.Get() != first.Texture.Get() || next.Blend != first.Blend) break;
             end++;
         }

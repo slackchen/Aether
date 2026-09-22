@@ -89,7 +89,9 @@ bool D3D11Device::Init(void* nativeWindowHandle)
     desc1.SampleDesc.Count = 1;
     desc1.SampleDesc.Quality = 0;
     desc1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc1.BufferCount = 2;
+    // 3 buffers + frame latency 3: the CPU assembles frame N+2 while the GPU
+    // still renders N, so Present no longer stalls mid-frame work.
+    desc1.BufferCount = 3;
     desc1.Scaling = DXGI_SCALING_STRETCH;
     desc1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     desc1.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
@@ -102,6 +104,12 @@ bool D3D11Device::Init(void* nativeWindowHandle)
         return false;
     }
     factory->MakeWindowAssociation(mHwnd, DXGI_MWA_NO_ALT_ENTER);
+
+    ComPtr<IDXGISwapChain2> swapchain2;
+    if (SUCCEEDED(mSwapchain.As(&swapchain2)))
+    {
+        swapchain2->SetMaximumFrameLatency(3);
+    }
 
     printf("D3D11 device initialized\n");
     fflush(stdout);

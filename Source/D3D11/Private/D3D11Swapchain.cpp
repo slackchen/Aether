@@ -56,7 +56,7 @@ RHI::RHITextureView* D3D11Swapchain::GetCurrentView()
             ctx->Flush();
         }
         writeResizeLog("resize attempt %ux%u\n", cw, ch);
-        HRESULT hr = mSwapchain->ResizeBuffers(2, cw, ch, DXGI_FORMAT_UNKNOWN, 0);
+        HRESULT hr = mSwapchain->ResizeBuffers(3, cw, ch, DXGI_FORMAT_UNKNOWN, 0);
         if (FAILED(hr))
         {
             writeResizeLog("ResizeBuffers(%u,%u) failed 0x%08lx\n", cw, ch, (unsigned long)hr);

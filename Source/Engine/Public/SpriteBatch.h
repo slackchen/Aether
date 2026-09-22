@@ -8,6 +8,7 @@
 #include "Math/Mat4.h"
 #include "Math/Vec2.h"
 #include "RHI.h"
+#include "Threading/JobSystem.h"
 
 namespace Aether::Engine {
 
@@ -26,12 +27,21 @@ struct Sprite
     Math::Vec2 QuadPts[4];
 };
 
+//
+// Accumulating sprite batch. Add/AddUv/AddQuad append to the calling
+// thread's bin (Jobs::ThreadIndex), so render-prep running inside
+// ParallelFor can push sprites from any worker without locks; the main
+// thread's bin is bin 0. Render() merges bins in ascending bin order
+// (deterministic), sorts by layer, builds vertices in parallel and submits
+// on the calling thread.
+//
 class SpriteBatch
 {
 public:
     static constexpr u32 MAX_SPRITES = 16384;
     static constexpr u32 VERTICES_PER_SPRITE = 4;
     static constexpr u32 FLOATS_PER_VERTEX = 8;
+    static constexpr u32 MAX_BINS = 64;
 
     bool Init(RHI::RHIDevice* device, RHI::Format colorFormat);
     void Clear();
@@ -48,9 +58,16 @@ public:
                  RHI::BlendMode blend = RHI::BlendMode::Alpha);
 
     void Render(RHI::RHICommandEncoder* encoder, const Math::Mat4& vp);
-    u32 SpriteCount() const { return mSprites.Count(); }
+    u32 SpriteCount() const;
 
 private:
+    struct SpriteRef
+    {
+        u32 Bin;
+        u32 Index;
+    };
+
+    Array<Sprite>& CurrentBin();
     void BuildQuad(const Sprite& sprite, f32* verts);
 
     RHI::RHIDevice* mDevice = nullptr;
@@ -62,10 +79,11 @@ private:
     RefPtr<RHI::RHIRenderPipeline> mAdditivePipeline;
     RHI::BindGroupLayoutDesc mBindGroupLayoutDesc;
     HashMap<const RHI::RHITexture*, RefPtr<RHI::RHIBindGroup>> mBindGroupCache;
-    Array<Sprite> mSprites;
+    // bin 0 = main/external thread, 1..N = job system workers
+    Array<Sprite> mBins[MAX_BINS];
     // render() 复用的临时空间, 避免每帧分配/整块拷贝
-    Array<u32> mSortScratch;
+    Array<SpriteRef> mMergeScratch;
     Array<f32> mVertexScratch;
 };
 
-}
+} // namespace Aether::Engine
