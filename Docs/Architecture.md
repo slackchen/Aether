@@ -64,7 +64,27 @@ scheduler.Register(std::move(def));
 - 波与波之间隐式同步；Phase 之间同步点由 `EngineLoop` 保证。
 - 注册序即语义序：迁移旧代码时按原 `Update()` 的语句顺序注册即可保序。
 
-Phase 顺序：`Input → Simulation → RenderPrep → RenderSubmit → UI`。
+Phase 顺序：`Input → Simulation → RenderPrep → FrameBegin → RenderSubmit → UI → FrameEnd`。
+
+**引擎自己的服务也是 System**，由 `EngineLoop` 在构造时注册（先于游戏的
+startup 回调，注册序即语义序）：
+
+| 引擎 System | Phase | 职责 |
+|---|---|---|
+| `EngineTimer` | Input | 更新 Timer，填 `ctx.Delta/UnscaledDelta/Elapsed`（写 `Tags::Time`） |
+| `EngineInput` | Input | `Input::CaptureSnapshot` 填本帧快照（写 `Tags::Input`） |
+| `EngineFrameBegin` | FrameBegin | `BeginFrame` 打开渲染 pass，写 `ctx.FrameActive` |
+| `EngineUI` | UI | 默认开着：清批次 → `UI::Draw` → 屏幕空间冲刷；游戏自己集成 UI 时 `SetAutoUI(false)` |
+| `EngineFrameEnd` | FrameEnd | `EndFrame` 提交 + Present |
+
+契约：游戏系统若与引擎系统**同相位**读它写的东西（Input 相位读输入、
+读 dt），必须在 `Reads` 里声明 `Tags::Input` / `Tags::Time` 才能被排到
+引擎系统之后；相位边界之后的相位天然有序。RenderSubmit/UI 系统需检查
+`ctx.FrameActive`，为 false 时早退（如窗口 resize 竞态）。
+
+`EngineLoop::Tick` 因此只剩三件事：渲染器就绪门控（未就绪时跑初始化
+状态机）、`Jobs::ScratchReset`（帧首重置 arena）、按序跑完全部 Phase。
+除了调度器本身，引擎没有任何帧内硬编码逻辑。
 RenderSubmit/UI 在 `BeginFrame/EndFrame` 之间执行（主线程单点提交 GPU）。
 
 `Blackboard` 是类型键控的服务定位器（`TypeIdOf<T>()`），系统发布指针、
@@ -74,16 +94,17 @@ RenderSubmit/UI 在 `BeginFrame/EndFrame` 之间执行（主线程单点提交 G
 
 ```
 Tick():
-  Renderer.Tick()            // 设备初始化状态机/调试队列
-  (首次就绪) startup 回调     // 创建游戏资源、注册 System
+  Renderer.Tick()            // 设备初始化状态机/调试队列 (就绪门控)
+  (首次就绪) startup 回调     // 创建游戏资源、注册游戏 System
   Jobs::ScratchReset()       // 帧首重置每线程 arena
-  Timer.Update(); Input::CaptureSnapshot()
-  RunPhase(Input); RunPhase(Simulation); RunPhase(RenderPrep)
-  BeginFrame(); RunPhase(RenderSubmit); RunPhase(UI); EndFrame()
+  SystemContext ctx          // Input 指向成员快照, 由 EngineInput 系统填充
+  依序 RunPhase: Input → Simulation → RenderPrep →
+                 FrameBegin → RenderSubmit → UI → FrameEnd
 ```
 
-`InputSnapshot` 帧首捕获、当帧只读，worker 线程可安全访问；旧的
-`Input::` 静态查询 API 保留（快照捕获时同步刷新）。
+引擎服务全部以 System 形式参与调度（见上节）；`InputSnapshot` 帧首由
+`EngineInput` 系统捕获、当帧只读，worker 线程可安全访问；旧的 `Input::`
+静态查询 API 保留（快照捕获时同步刷新）。
 
 ## 并行渲染管线
 

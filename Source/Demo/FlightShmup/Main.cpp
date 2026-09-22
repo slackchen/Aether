@@ -38,6 +38,8 @@ void RegisterSystems(App& app)
     Engine::SystemDef audioUnlock;
     audioUnlock.Name = "AudioUnlock";
     audioUnlock.SysPhase = Engine::Phase::Input;
+    // 同相位读引擎 InputSystem 写的快照, 必须声明 Reads 才能排到它之后
+    audioUnlock.Reads = {Engine::TypeIdOf<Engine::Tags::Input>()};
     audioUnlock.Update = [&app](Engine::SystemContext& ctx) {
         AETHER_UNUSED(app);
         if (ctx.Input->AnyGesture() || ctx.Input->WasPressed(Engine::Key::Confirm))
@@ -61,8 +63,8 @@ void RegisterSystems(App& app)
     Engine::SystemDef gameRender;
     gameRender.Name = "GameRender";
     gameRender.SysPhase = Engine::Phase::RenderSubmit;
-    gameRender.Update = [&app](Engine::SystemContext&) {
-        if (app.Game)
+    gameRender.Update = [&app](Engine::SystemContext& ctx) {
+        if (app.Game && ctx.FrameActive)
         {
             app.Game->Render();
         }

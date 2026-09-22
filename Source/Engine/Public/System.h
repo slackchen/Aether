@@ -12,21 +12,41 @@ namespace Aether::Engine {
 // Frame phases, in execution order. Phases are synchronization points:
 // every system of a phase completes before the next phase starts.
 //
-//   Input        - consume the input snapshot, produce intent (camera, commands)
+//   Input        - engine InputSystem fills the input snapshot; game systems
+//                  consume it and produce intent (camera, commands)
 //   Simulation   - advance game state
 //   RenderPrep   - build render data from state in parallel (CPU heavy)
-//   RenderSubmit - issue draw calls on the main thread (inside BeginFrame/EndFrame)
-//   UI           - immediate-mode UI drawing (inside BeginFrame/EndFrame)
+//   FrameBegin   - engine FrameBeginSystem: BeginFrame (render pass open)
+//   RenderSubmit - issue draw calls (main thread, inside the render pass)
+//   UI           - immediate-mode UI drawing (inside the render pass)
+//   FrameEnd     - engine FrameEndSystem: EndFrame (submit + present)
+//
+// Engine-owned services (timer, input, frame begin/end, default UI) are
+// themselves systems, registered by EngineLoop before the game registers
+// its own - registration order keeps them ahead of game systems.
 //
 enum class Phase
 {
     Input,
     Simulation,
     RenderPrep,
+    FrameBegin,
     RenderSubmit,
     UI,
+    FrameEnd,
     Count
 };
+
+//
+// Blackboard tags written by the engine's own systems. Game systems that
+// read the corresponding context state during the SAME phase must declare
+// these in Reads to be ordered after the engine system (later phases are
+// ordered by the phase boundary regardless).
+//
+namespace Tags {
+struct Time;   // ctx.Delta / UnscaledDelta / Elapsed (engine TimerSystem)
+struct Input;  // ctx.Input snapshot contents (engine InputSystem)
+} // namespace Tags
 
 //
 // Stable per-type id (address of a static byte, unique per T per process).
@@ -71,7 +91,11 @@ private:
 };
 
 //
-// Read-only per-frame context handed to every system update.
+// Per-frame context handed to every system update. Delta/Elapsed are filled
+// by the engine TimerSystem (Phase::Input); Input points at the snapshot the
+// engine InputSystem fills (Phase::Input); FrameActive reports whether
+// FrameBeginSystem successfully opened the render pass - RenderSubmit/UI
+// systems must early-out when it is false.
 //
 struct SystemContext
 {
@@ -79,6 +103,7 @@ struct SystemContext
     f32 UnscaledDelta = 0.0f;
     f32 Elapsed = 0.0f;
     u64 FrameIndex = 0;
+    bool FrameActive = false;
     const InputSnapshot* Input = nullptr;
     Blackboard* World = nullptr;
 };

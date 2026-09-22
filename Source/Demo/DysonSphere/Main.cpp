@@ -64,6 +64,7 @@ int main()
     static App app;
     gApp = &app;
     app.Renderer.Init(1280, 720);
+    app.Loop.SetAutoUI(false); // DSPUI 把引擎 UI 集成进自己的批次, 关掉默认 UI 系统
     app.Loop.SetStartupCallback([]() {
         gApp->Game = MakeUnique<DSP::Game>(&gApp->Renderer, &gApp->Loop.GetTimer());
         gApp->Game->RegisterSystems(gApp->Loop.Scheduler());

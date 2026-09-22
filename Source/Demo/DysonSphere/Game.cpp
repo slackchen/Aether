@@ -685,7 +685,7 @@ void Game::SysRenderPrep(Engine::SystemContext&)
 
 void Game::SysRenderSubmit(Engine::SystemContext& ctx)
 {
-    if (!mRenderer) return;
+    if (!mRenderer || !ctx.FrameActive) return;
 
     auto* enc = mRenderer->Encoder();
     auto& batch = mRenderer->Sprites();

@@ -937,8 +937,6 @@ void Game::Render()
     mTrail.Render(batch);
     mParticles.Render(batch);
 
-    UI::Draw(mRenderer);
-
     batch.Render(enc, cam.ViewProjection(mRenderer->Aspect()));
 }
 
