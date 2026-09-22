@@ -15,10 +15,13 @@ namespace Aether::Engine {
 //   Input        - engine InputSystem fills the input snapshot; game systems
 //                  consume it and produce intent (camera, commands)
 //   Simulation   - advance game state
-//   RenderPrep   - build render data from state in parallel (CPU heavy)
-//   FrameBegin   - engine FrameBeginSystem: BeginFrame (render pass open)
-//   RenderSubmit - issue draw calls (main thread, inside the render pass)
-//   UI           - immediate-mode UI drawing (inside the render pass)
+//   FrameBegin   - engine FrameBeginSystem: BeginFrame (open render pass,
+//                  clear sprite batch)
+//   RenderPrep   - build render data in parallel (CPU heavy; sprites
+//                  accumulate into per-thread bins AFTER the batch was
+//                  cleared by FrameBegin)
+//   RenderSubmit - flush batches / issue draw calls (main thread)
+//   UI           - immediate-mode UI drawing
 //   FrameEnd     - engine FrameEndSystem: EndFrame (submit + present)
 //
 // Engine-owned services (timer, input, frame begin/end, default UI) are
@@ -29,8 +32,8 @@ enum class Phase
 {
     Input,
     Simulation,
-    RenderPrep,
     FrameBegin,
+    RenderPrep,
     RenderSubmit,
     UI,
     FrameEnd,

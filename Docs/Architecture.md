@@ -64,7 +64,9 @@ scheduler.Register(std::move(def));
 - 波与波之间隐式同步；Phase 之间同步点由 `EngineLoop` 保证。
 - 注册序即语义序：迁移旧代码时按原 `Update()` 的语句顺序注册即可保序。
 
-Phase 顺序：`Input → Simulation → RenderPrep → FrameBegin → RenderSubmit → UI → FrameEnd`。
+Phase 顺序：`Input → Simulation → FrameBegin → RenderPrep → RenderSubmit → UI → FrameEnd`。
+FrameBegin 必须在 RenderPrep 之前：`BeginFrame` 会清空 sprite batch，
+prep 阶段的并行精灵累积必须发生在清空之后。
 
 **引擎自己的服务也是 System**，由 `EngineLoop` 在构造时注册（先于游戏的
 startup 回调，注册序即语义序）：

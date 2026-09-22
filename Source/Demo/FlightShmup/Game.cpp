@@ -937,6 +937,9 @@ void Game::Render()
     mTrail.Render(batch);
     mParticles.Render(batch);
 
+    // Shmup::UI::Draw - 游戏门面 (标题/HUD 面板), 引擎 EngineUI 系统只画闪字
+    UI::Draw(mRenderer);
+
     batch.Render(enc, cam.ViewProjection(mRenderer->Aspect()));
 }
 

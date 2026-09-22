@@ -48,6 +48,8 @@ void UISystem(Renderer2D& renderer, SystemContext& ctx)
     {
         return;
     }
+    // 引擎门面 UI (闪字/tooltip/进度条): 独立清批-绘制-冲刷。
+    // 游戏自己的面板/HUD 由游戏在 RenderSubmit 或 UI 相位自行绘制。
     SpriteBatch& batch = renderer.Sprites();
     batch.Clear();
     UI::Draw(&renderer);

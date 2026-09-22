@@ -97,6 +97,7 @@ void FrameLoop(void* userData)
 
 int main()
 {
+    setvbuf(stdout, nullptr, _IONBF, 0);
     Platform::InitWindow(1280, 720, "Aether Shmup");
     Engine::Input::Init();
     Engine::Audio::Init();
