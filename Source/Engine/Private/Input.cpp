@@ -601,4 +601,71 @@ void Input::Update()
 #endif
 }
 
+void Input::CaptureSnapshot(InputSnapshot& out)
+{
+#ifdef __EMSCRIPTEN__
+    JsInputUpdate();
+    JsInputPoll();
+
+    for (u32 k = 0; k < (u32)KeyCode::Count; k++)
+    {
+        const char* code = KeyCodeToStr((KeyCode)k);
+        out.KeyDown[k] = JsInputState("down", code) != 0;
+        out.KeyPressed[k] = JsInputState("pressed", code) != 0;
+        out.KeyReleased[k] = JsInputState("released", code) != 0;
+    }
+    for (u32 k = 0; k < (u32)Key::Count; k++)
+    {
+        Key key = (Key)k;
+        const char* code = LegacyKeyToStr(key);
+        out.AbstractDown[k] = JsInputState("down", code) != 0;
+        out.AbstractPressed[k] = JsInputState("pressed", code) != 0;
+        out.AbstractReleased[k] = JsInputState("released", code) != 0;
+        if (key == Key::Fire)
+        {
+            // Fire maps to J or Space, mirroring the legacy query.
+            out.AbstractDown[k] = out.AbstractDown[k] || JsInputState("down", "Space") != 0;
+            out.AbstractPressed[k] =
+                out.AbstractPressed[k] || JsInputState("pressed", "Space") != 0;
+            out.AbstractReleased[k] =
+                out.AbstractReleased[k] || JsInputState("released", "Space") != 0;
+        }
+    }
+    out.MousePos = {JsGetMouseX(), JsGetMouseY()};
+    out.MouseDelta = {JsGetMouseDx(), JsGetMouseDy()};
+    out.MouseWheel = JsGetMouseWheel();
+    for (u32 b = 0; b < 3; b++)
+    {
+        out.MouseDown[b] = JsGetMouseDown((int)b) != 0;
+        out.MousePressed[b] = JsGetMousePressed((int)b) != 0;
+        out.MouseReleased[b] = JsGetMouseReleased((int)b) != 0;
+    }
+#else
+    // Same poll the legacy end-of-frame Update() performs, then copy out.
+    Input::Update();
+
+    for (u32 k = 0; k < LEGACY_KEY_COUNT; k++)
+    {
+        out.AbstractDown[k] = gState.LegacyDown[k];
+        out.AbstractPressed[k] = gState.LegacyPressed[k];
+        out.AbstractReleased[k] = gState.LegacyReleased[k];
+    }
+    for (u32 k = 0; k < KEY_CODE_COUNT; k++)
+    {
+        out.KeyDown[k] = gState.KeyDown[k];
+        out.KeyPressed[k] = gState.KeyPressed[k];
+        out.KeyReleased[k] = gState.KeyReleased[k];
+    }
+    out.MousePos = gState.MousePos;
+    out.MouseDelta = gState.MouseDelta;
+    out.MouseWheel = gState.MouseWheel;
+    for (u32 b = 0; b < 3; b++)
+    {
+        out.MouseDown[b] = gState.MouseDown[b];
+        out.MousePressed[b] = gState.MousePressed[b];
+        out.MouseReleased[b] = gState.MouseReleased[b];
+    }
+#endif
+}
+
 }

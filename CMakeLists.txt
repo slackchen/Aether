@@ -37,6 +37,8 @@ set(AETHER_ENGINE_PUBLIC   ${CMAKE_CURRENT_SOURCE_DIR}/Source/Engine/Public)
 set(AETHER_ENGINE_SOURCES
     Source/Platform/Private/Threading/Threading.cpp
     Source/Platform/Private/Threading/JobSystem.cpp
+    Source/Engine/Private/SystemScheduler.cpp
+    Source/Engine/Private/EngineLoop.cpp
     Source/Engine/Private/Renderer.cpp
     Source/Engine/Private/Renderer2D.cpp
     Source/Engine/Private/Mesh.cpp

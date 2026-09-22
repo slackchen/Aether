@@ -872,8 +872,6 @@ void Game::UpdateParticles(f32 dt)
 
 void Game::Render()
 {
-    if (!mRenderer->BeginFrame()) return;
-
     RHI::RHICommandEncoder* enc = mRenderer->Encoder();
     mRenderer->GetStarfield().Render(enc, mRealTime, mState == State::Boss ? 1.6f : 1.0f,
                                      (f32)mRenderer->Width(), (f32)mRenderer->Height());
@@ -942,8 +940,6 @@ void Game::Render()
     UI::Draw(mRenderer);
 
     batch.Render(enc, cam.ViewProjection(mRenderer->Aspect()));
-
-    mRenderer->EndFrame();
 }
 
 }

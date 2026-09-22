@@ -4,9 +4,11 @@
 #include "Audio.h"
 #include "Container/RefPtr.h"
 #include "Core.h"
+#include "EngineLoop.h"
 #include "Input.h"
 #include "Platform.h"
 #include "Renderer2D.h"
+#include "System.h"
 #include "Timer.h"
 #include "UI.h"
 
@@ -20,27 +22,57 @@ namespace
 struct App
 {
     Engine::Renderer2D Renderer;
-    Engine::Timer Timer;
+    Engine::EngineLoop Loop;
     UniquePtr<Shmup::Game> Game;
-    bool Started = false;
+
+    App()
+        : Loop(Renderer)
+    {
+    }
 };
 
 App* gApp = nullptr;
 
+void RegisterSystems(App& app)
+{
+    Engine::SystemDef audioUnlock;
+    audioUnlock.Name = "AudioUnlock";
+    audioUnlock.SysPhase = Engine::Phase::Input;
+    audioUnlock.Update = [&app](Engine::SystemContext& ctx) {
+        AETHER_UNUSED(app);
+        if (ctx.Input->AnyGesture() || ctx.Input->WasPressed(Engine::Key::Confirm))
+        {
+            Engine::Audio::Unlock();
+        }
+    };
+    app.Loop.Scheduler().Register(std::move(audioUnlock));
+
+    Engine::SystemDef gameUpdate;
+    gameUpdate.Name = "Game";
+    gameUpdate.SysPhase = Engine::Phase::Simulation;
+    gameUpdate.Update = [&app](Engine::SystemContext&) {
+        if (app.Game)
+        {
+            app.Game->Update();
+        }
+    };
+    app.Loop.Scheduler().Register(std::move(gameUpdate));
+
+    Engine::SystemDef gameRender;
+    gameRender.Name = "GameRender";
+    gameRender.SysPhase = Engine::Phase::RenderSubmit;
+    gameRender.Update = [&app](Engine::SystemContext&) {
+        if (app.Game)
+        {
+            app.Game->Render();
+        }
+    };
+    app.Loop.Scheduler().Register(std::move(gameRender));
+}
+
 void FrameLoop(void* userData)
 {
     App* app = static_cast<App*>(userData);
-
-    app->Renderer.Tick();
-    if (!app->Renderer.IsReady())
-    {
-        if (app->Renderer.IsFailed())
-        {
-            printf("Renderer failed to initialize\n");
-            Platform::RequestExit();
-        }
-        return;
-    }
 
     static bool sAltRegistered = false;
     if (!sAltRegistered)
@@ -56,25 +88,10 @@ void FrameLoop(void* userData)
 #endif
     }
 
-    if (!app->Started)
-    {
-        app->Started = true;
-        app->Game = MakeUnique<Shmup::Game>(&app->Renderer, &app->Timer);
-        Shmup::UI::ShowScreen("panel-title", true);
-    }
-
-    app->Timer.Update();
-    if (Engine::Input::AnyGesture() || Engine::Input::WasPressed(Engine::Key::Confirm))
-    {
-        Engine::Audio::Unlock();
-    }
-
-    app->Game->Update();
-    app->Game->Render();
-    Engine::Input::Update();
+    app->Loop.Tick();
 }
 
-}
+} // namespace
 
 int main()
 {
@@ -86,6 +103,11 @@ int main()
     static App sApp;
     gApp = &sApp;
     sApp.Renderer.Init(1280, 720);
+    sApp.Loop.SetStartupCallback([]() {
+        gApp->Game = MakeUnique<Shmup::Game>(&gApp->Renderer, &gApp->Loop.GetTimer());
+        Shmup::UI::ShowScreen("panel-title", true);
+        RegisterSystems(*gApp);
+    });
 
     Platform::RunMainLoop(FrameLoop, &sApp);
     return 0;
