@@ -47,9 +47,23 @@
 | `Random` | `mt19937 + distributions` | `NextU32/NextU64/NextF32/Range(i32,i32)/Range(f32,f32)`，确定性种子 |
 | `Math::` | `<cmath>` 封装 | `Vec2/Vec3/Vec4/Mat4/Color`、`Min/Max/Clamp/Abs/Lerp/Saturate`、`PI/TWO_PI/DEG_TO_RAD` |
 
-保留允许：C 运行时（`cstdio/cmath/cstring/cassert/cstdint/cstdlib`）、线程原语（`thread/mutex/atomic/chrono`）、`printf`、平台 SDK 头。数学矩阵为**列主序**、D3D 深度约定（勿改语义）。
+保留允许：C 运行时（`cstdio/cmath/cstring/cassert/cstdint/cstdlib`）、`printf`、平台 SDK 头。数学矩阵为**列主序**、D3D 深度约定（勿改语义）。
 
-## 5. 转换对照（旧 → 新）
+## 5. 线程纪律（禁止裸用 std 并发原语）
+
+引擎代码**禁止**直接使用 `std::thread / std::mutex / std::atomic / std::condition_variable / std::lock_guard`，一律走封装层，便于日后按平台替换原生实现（SRWLOCK、WaitOnAddress、fiber 等）：
+
+| 自研 | 替代 | 要点 |
+|---|---|---|
+| `Atomic<T>`（Core，`Threading/Atomic.h`） | `std::atomic` | 显式内存序命名（`LoadRelaxed/LoadAcquire/StoreRelease/FetchAddAcqRel/CompareExchange*`），无隐式转换 |
+| `Platform::Thread` | `std::thread` | `Run(entry, name, priority)/Join/Detach`；静态 `SetCurrentThreadName/SetCurrentThreadPriority/SleepMillis/YieldCpu` |
+| `Platform::Mutex` + `ScopedLock` | `std::mutex` + `lock_guard` | 冷路径粗粒度临界区；短热临界区用 `SpinLock`/原子 |
+| `Platform::SpinLock` + `ScopedSpinLock` | 自旋 | 仅限极短临界区（几十周期），禁止跨系统调用/分配/回调持有 |
+| `Platform::Event` | `CreateEvent`/condvar | auto-reset；`Signal/Reset/Wait(timeout)`；Win32 下 `NativeHandle()` 暴露 `HANDLE` |
+
+层次：`Core::Atomic` 是最底层（`RefCounted` 需要）；其余触 OS 的同步原语、线程、JobSystem 都在 `Platform::Threading`。参照样板：`Engine/Private/Audio.cpp`（锁纪律：热点标量用 atomic、队列冷路径用 mutex）。Web 构建保持单线程，线程 API 编译通过但不应创建线程。
+
+## 6. 转换对照（旧 → 新）
 
 ```
 init() / begin_frame()          → Init() / BeginFrame()

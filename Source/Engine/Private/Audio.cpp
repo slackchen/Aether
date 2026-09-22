@@ -4,13 +4,14 @@
 #include "Core.h"
 #include "Math/Math.h"
 #include "Random.h"
+#include "Threading/Atomic.h"
+#include "Threading/Event.h"
+#include "Threading/Mutex.h"
+#include "Threading/Thread.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-
-#include <atomic>
-#include <mutex>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -20,11 +21,8 @@
 #include <windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
-#include <avrt.h>
-#include <thread>
 
 #pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "avrt.lib")
 #endif
 
 using namespace Aether;
@@ -41,14 +39,14 @@ u32 gSampleRate = 44100;
 constexpr float STEP_SECONDS = 60.0f / 148.0f / 4.0f;
 u32 StepFrames() { return (u32)(STEP_SECONDS * (float)gSampleRate); }
 
-std::atomic<int> gMusicIntensity{0};
+Atomic<i32> gMusicIntensity{0};
 
 struct MusicBlock
 {
     Array<float> Data;
     u32 Pos = 0;
 };
-std::mutex gMusicMutex;
+Platform::Mutex gMusicMutex;
 Array<MusicBlock> gMusicQueue;
 bool gMusicOn = false;
 int gMusicStep = 0;
@@ -60,7 +58,7 @@ struct SfxSlot
     u32 Pos = 0;
 };
 SfxSlot gSfx[NUM_SFX_SLOTS];
-std::mutex gSfxMutex;
+Platform::Mutex gSfxMutex;
 
 struct Biquad
 {
@@ -241,8 +239,8 @@ void SynthSfx(Sfx sfx, Array<float>& out)
     }
 }
 
-std::atomic<int> gMusicMode{0};
-std::atomic<float> gVacuumFilter{0.0f};
+Atomic<i32> gMusicMode{0};
+Atomic<f32> gVacuumFilter{0.0f};
 
 // Mode 0 (Flight Shmup Arcade Music)
 constexpr float BASS_ROOTS[4] = {110.0f, 87.31f, 130.81f, 98.0f};
@@ -272,7 +270,7 @@ constexpr float FACTORY_BASS[4] = {55.0f, 65.41f, 73.42f, 48.99f}; // A1, C2, D2
 
 void SynthMusicStep(int step, int intensity, Array<float>& out)
 {
-    int mode = gMusicMode.load();
+    int mode = gMusicMode.LoadRelaxed();
     int bar = (step / 16) % 4;
     int bs = step % 16;
     float gm = intensity >= 1 ? 1.15f : 1.0f;
@@ -364,7 +362,7 @@ void FillAudio(float* dst, u32 frames)
     u32 left = frames;
 
     {
-        std::lock_guard<std::mutex> lock(gMusicMutex);
+        Platform::ScopedLock lock(gMusicMutex);
         if (gMusicOn)
         {
             static Array<float> sCarry;
@@ -375,7 +373,7 @@ void FillAudio(float* dst, u32 frames)
                 blk.Data.Resize(StepFrames(), 0.0f);
                 u32 carryCount = sCarry.Count() < blk.Data.Count() ? sCarry.Count() : blk.Data.Count();
                 for (u32 i = 0; i < carryCount; i++) blk.Data[i] += sCarry[i];
-                SynthMusicStep(gMusicStep, gMusicIntensity.load(), blk.Data);
+                SynthMusicStep(gMusicStep, gMusicIntensity.LoadRelaxed(), blk.Data);
                 gMusicStep = (gMusicStep + 1) % 64;
                 if (blk.Data.Count() > StepFrames())
                 {
@@ -404,7 +402,7 @@ void FillAudio(float* dst, u32 frames)
     }
 
     {
-        std::lock_guard<std::mutex> lock(gSfxMutex);
+        Platform::ScopedLock lock(gSfxMutex);
         for (int s = 0; s < NUM_SFX_SLOTS; s++)
         {
             SfxSlot& slot = gSfx[s];
@@ -418,7 +416,7 @@ void FillAudio(float* dst, u32 frames)
         }
     }
 
-    float vac = gVacuumFilter.load();
+    float vac = gVacuumFilter.LoadRelaxed();
     if (vac > 0.01f)
     {
         static float sLpfState = 0.0f;
@@ -435,7 +433,7 @@ void QueueSfx(Sfx sfx)
 {
     Array<float> pcm;
     SynthSfx(sfx, pcm);
-    std::lock_guard<std::mutex> lock(gSfxMutex);
+    Platform::ScopedLock lock(gSfxMutex);
     int best = 0;
     u32 oldest = 0;
     for (int i = 0; i < NUM_SFX_SLOTS; i++)
@@ -538,10 +536,10 @@ namespace {
 
 IAudioClient* gClient = nullptr;
 IAudioRenderClient* gRenderClient = nullptr;
-HANDLE gAudioEvent = nullptr;
+Platform::Event gAudioEvent;
 UINT32 gBufferFrames = 0;
-std::thread gAudioThread;
-std::atomic<bool> gAudioRunning{false};
+Platform::Thread gAudioThread;
+Atomic<bool> gAudioRunning{false};
 bool gAudioOk = false;
 
 enum class OutFormat
@@ -557,8 +555,8 @@ struct AudioShutdown
 {
     ~AudioShutdown()
     {
-        gAudioRunning = false;
-        if (gAudioThread.joinable()) gAudioThread.join();
+        gAudioRunning.StoreRelaxed(false);
+        if (gAudioThread.Joinable()) gAudioThread.Join();
     }
 };
 AudioShutdown gAudioShutdown;
@@ -598,14 +596,14 @@ void WriteOut(float* mono, u32 frames, BYTE* raw)
 
 void AudioThreadProc()
 {
-    DWORD mmcssIndex = 0;
-    HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Audio", &mmcssIndex);
+    // MMCSS "Audio" boost is applied by the Thread layer (ThreadPriority::Audio).
     Array<float> mono;
-    while (gAudioRunning.load())
+    while (gAudioRunning.LoadRelaxed())
     {
-        DWORD w = WaitForSingleObject(gAudioEvent, 1000);
-        if (w == WAIT_TIMEOUT) continue;
-        if (w != WAIT_OBJECT_0) break;
+        if (!gAudioEvent.Wait(1000))
+        {
+            continue; // timeout, re-check the running flag
+        }
         UINT32 pad = 0;
         if (FAILED(gClient->GetCurrentPadding(&pad))) continue;
         UINT32 frames = gBufferFrames - pad;
@@ -617,7 +615,6 @@ void AudioThreadProc()
         WriteOut(mono.Data(), frames, data);
         gRenderClient->ReleaseBuffer(frames, 0);
     }
-    if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 }
 
 }  // namespace
@@ -700,35 +697,32 @@ void Audio::Init()
         printf("Audio: Initialize failed hr=0x%08lx\n", (unsigned long)hr);
         return;
     }
-    gAudioEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    if (!gAudioEvent)
+    if (!gAudioEvent.NativeHandle())
     {
         gClient->Release();
         gClient = nullptr;
-        printf("Audio: CreateEvent failed\n");
+        printf("Audio: event creation failed\n");
         return;
     }
-    gClient->SetEventHandle(gAudioEvent);
+    gClient->SetEventHandle(static_cast<HANDLE>(gAudioEvent.NativeHandle()));
     gClient->GetBufferSize(&gBufferFrames);
     hr = gClient->GetService(IID_PPV_ARGS(&gRenderClient));
     if (FAILED(hr))
     {
         gRenderClient = nullptr;
-        CloseHandle(gAudioEvent);
-        gAudioEvent = nullptr;
         gClient->Release();
         gClient = nullptr;
         printf("Audio: GetService failed\n");
         return;
     }
 
-    gAudioRunning = true;
-    gAudioThread = std::thread(AudioThreadProc);
-    gAudioThread.detach();
+    gAudioRunning.StoreRelaxed(true);
+    gAudioThread.Run(AudioThreadProc, "AetherAudio", Platform::ThreadPriority::Audio);
+    gAudioThread.Detach();
     hr = gClient->Start();
     if (FAILED(hr))
     {
-        gAudioRunning = false;
+        gAudioRunning.StoreRelaxed(false);
         printf("Audio: Start failed\n");
         return;
     }
@@ -760,8 +754,8 @@ void Audio::Play(Sfx sfx)
 
 void Audio::StartMusic(i32 intensity)
 {
-    std::lock_guard<std::mutex> lock(gMusicMutex);
-    gMusicIntensity.store((int)intensity);
+    Platform::ScopedLock lock(gMusicMutex);
+    gMusicIntensity.StoreRelaxed(intensity);
     if (!gMusicOn)
     {
         gMusicOn = true;
@@ -772,7 +766,7 @@ void Audio::StartMusic(i32 intensity)
 
 void Audio::SetMusicIntensity(i32 intensity)
 {
-    gMusicIntensity.store((int)intensity);
+    gMusicIntensity.StoreRelaxed(intensity);
 }
 
 void Audio::SetMusicTrack(MusicTrack track)
@@ -782,10 +776,10 @@ void Audio::SetMusicTrack(MusicTrack track)
 
 void Audio::SetMusicMode(i32 mode)
 {
-    if (gMusicMode.load() != (int)mode)
+    if (gMusicMode.LoadRelaxed() != mode)
     {
-        gMusicMode.store((int)mode);
-        std::lock_guard<std::mutex> lock(gMusicMutex);
+        gMusicMode.StoreRelaxed(mode);
+        Platform::ScopedLock lock(gMusicMutex);
         gMusicQueue.Clear();
         gMusicStep = 0;
     }
@@ -793,12 +787,12 @@ void Audio::SetMusicMode(i32 mode)
 
 void Audio::SetVacuumFilter(f32 factor)
 {
-    gVacuumFilter.store(Math::Clamp(factor, 0.0f, 1.0f));
+    gVacuumFilter.StoreRelaxed(Math::Clamp(factor, 0.0f, 1.0f));
 }
 
 void Audio::StopMusic()
 {
-    std::lock_guard<std::mutex> lock(gMusicMutex);
+    Platform::ScopedLock lock(gMusicMutex);
     gMusicOn = false;
     gMusicQueue.Clear();
 }

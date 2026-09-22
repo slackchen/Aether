@@ -16,4 +16,14 @@ f32 GetAndResetMouseWheel();
 void SetAltEnterCallback(void (*callback)());
 #endif
 
+//
+// CPU topology queries (implemented in Private/Threading/Threading.cpp).
+//
+namespace CpuInfo {
+
+u32 LogicalCoreCount();
+u32 CacheLineSize();
+
+} // namespace CpuInfo
+
 }

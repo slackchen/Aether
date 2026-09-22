@@ -35,6 +35,7 @@ set(AETHER_PLATFORM_PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Source/Platform/Public)
 set(AETHER_ENGINE_PUBLIC   ${CMAKE_CURRENT_SOURCE_DIR}/Source/Engine/Public)
 
 set(AETHER_ENGINE_SOURCES
+    Source/Platform/Private/Threading/Threading.cpp
     Source/Engine/Private/Renderer.cpp
     Source/Engine/Private/Renderer2D.cpp
     Source/Engine/Private/Mesh.cpp

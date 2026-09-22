@@ -1,8 +1,8 @@
 #pragma once
 
 #include "Core.h"
+#include "Threading/Atomic.h"
 
-#include <atomic>
 #include <concepts>
 #include <utility>
 
@@ -19,23 +19,23 @@ public:
     RefCounted(const RefCounted&) = delete;
     RefCounted& operator=(const RefCounted&) = delete;
 
-    void AddRef() const { mRefCount.fetch_add(1, std::memory_order_relaxed); }
+    void AddRef() const { mRefCount.FetchAddRelaxed(1); }
 
     void Release() const
     {
-        if (mRefCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        if (mRefCount.FetchSubAcqRel(1) == 1)
         {
             delete const_cast<RefCounted*>(this);
         }
     }
 
-    u32 GetRefCount() const { return mRefCount.load(std::memory_order_relaxed); }
+    u32 GetRefCount() const { return mRefCount.LoadRelaxed(); }
 
 protected:
     virtual ~RefCounted() = default;
 
 private:
-    mutable std::atomic<u32> mRefCount{0};
+    mutable Atomic<u32> mRefCount{0};
 };
 
 //
